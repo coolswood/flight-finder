@@ -1,0 +1,77 @@
+# Fairtrail — Self-Hosted Flight Price Tracker
+# Quick start: cp .env.example .env → edit API key → docker compose up -d
+#
+# Docs: https://github.com/affromero/flight-finder
+
+services:
+  db:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: flight_finder
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Redis is optional — improves performance with response caching.
+  # Comment out this service and unset REDIS_URL in .env to run without it.
+  redis:
+    image: docker.io/library/redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  web:
+    build: .
+    restart: unless-stopped
+    init: true
+    ipc: host
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${HOST_PORT:-3003}:3003"
+    env_file: .env
+    environment:
+      # Override with docker-compose internal networking
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/flight_finder
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      CHROME_PATH: /usr/bin/chromium-browser
+      NODE_ENV: production
+      SELF_HOSTED: "true"
+    extra_hosts:
+      # Podman users: host.containers.internal resolves automatically — no extra_hosts needed
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - app-data:/app/data
+      # The live CLI credentials. They must outlive the container: the CLIs
+      # rotate their refresh token in place and the server retires the previous
+      # one, so a container-local copy is dead after the next recreate.
+      - agent-claude-home:/home/node/.claude
+      - agent-codex-home:/home/node/.codex
+      # Uncomment to seed from the Claude Code CLI on your host machine:
+      # - ~/.claude:/home/node/.claude-host:ro
+      # Uncomment to seed from the Codex CLI on your host machine:
+      # - ~/.codex:/home/node/.codex-host:ro
+
+volumes:
+  pgdata:
+  redisdata:
+  app-data:
+  agent-claude-home:
+  agent-codex-home:

@@ -1,0 +1,71 @@
+import { getTranslations } from 'next-intl/server';
+import { HotelTrackers } from '@/components/hotels/HotelTrackers';
+import { CarTrackers } from '@/components/cars/CarTrackers';
+import { getCurrentUser } from '@/lib/user-auth';
+import { prisma } from '@/lib/prisma';
+import { groupQueries } from '@/lib/query-grouping';
+import { QueryGroupRow, type AdminQuery } from './QueryRow';
+import styles from './page.module.css';
+
+export const dynamic = 'force-dynamic';
+
+export default async function QueriesPage() {
+  const t = await getTranslations('AdminQueries');
+  const user = process.env.SELF_HOSTED === 'true' ? await getCurrentUser() : null;
+  const queries = await prisma.query.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: 500,
+    include: {
+      _count: { select: { snapshots: true, fetchRuns: true } },
+      fetchRuns: {
+        orderBy: { startedAt: 'desc' },
+        take: 1,
+        select: { startedAt: true, status: true, error: true },
+      },
+    },
+  });
+
+  const adminRows: AdminQuery[] = queries.map((q) => ({
+    id: q.id,
+    origin: q.origin,
+    originName: q.originName,
+    destination: q.destination,
+    destinationName: q.destinationName,
+    dateFrom: q.dateFrom.toISOString(),
+    dateTo: q.dateTo.toISOString(),
+    groupId: q.groupId,
+    active: q.active,
+    expiresAt: q.expiresAt.toISOString(),
+    scrapeInterval: q.scrapeInterval,
+    label: q.label,
+    preferredAggregators: q.preferredAggregators,
+    snapshotCount: q._count.snapshots,
+    runCount: q._count.fetchRuns,
+    createdAt: q.createdAt.toISOString(),
+    lastScrapedAt: q.fetchRuns[0]?.startedAt.toISOString() ?? null,
+    scrapeStatus: q.fetchRuns[0]?.status ?? null,
+    scrapeError: q.fetchRuns[0]?.error ?? null,
+  }));
+
+  const groups = groupQueries(adminRows);
+
+  return (
+    <div className={styles.root}>
+      <h1 className={styles.title}>{t('title')}</h1>
+      {process.env.SELF_HOSTED === 'true' && <HotelTrackers admin />}
+      {process.env.SELF_HOSTED === 'true' && <CarTrackers key={user?.id ?? 'single'} admin />}
+
+      {groups.length === 0 ? (
+        <p className={styles.empty}>
+          {t.rich('empty', { link: (chunks) => <a href="/">{chunks}</a> })}
+        </p>
+      ) : (
+        <div className={styles.list}>
+          {groups.map((group) => (
+            <QueryGroupRow key={group.primaryId} group={group} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

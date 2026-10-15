@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate --schema=apps/web/prisma/schema.prisma
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npx vitest run --reporter=verbose
+        working-directory: apps/web
+      - run: npx vitest run --reporter=verbose
+        working-directory: packages/cli
+      - run: npm run build
+      - run: npm run build --workspace=@flight-finder/cli
+      - run: node --test scripts/docker-publication.test.cjs scripts/desktop-publication.test.cjs
+      - run: node --test scripts/vpn/tailscale-vpn-bridge.test.mjs
+      - run: bash scripts/install-flow-test.sh
+      - run: python3 scripts/test_access_preparation.py
+      - run: python3 scripts/testing/test_installer_network.py -v
+      - run: bash scripts/cli-runtime-test.sh
+      - run: python3 -m unittest discover -s scripts -p 'test_deploy*.py' -v
+
+  account-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: security_test
+          POSTGRES_PASSWORD: security-local-test
+          POSTGRES_DB: security_test
+        ports:
+          - 55442:5432
+        options: >-
+          --health-cmd "pg_isready -U security_test -d security_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://security_test:security-local-test@127.0.0.1:55442/security_test
+      ACCOUNT_INTEGRATION_TESTS: '1'
+      REDIS_URL: ''
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run db:generate
+      - run: npm run db:push
+      - run: npm run test --workspace=@flight-finder/web -- src/lib/account-migration.integration.test.ts
+
+  install-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: docker build -f scripts/Dockerfile.install-test -t flight-finder-install-test .
+      - run: docker run --rm flight-finder-install-test
+
+  shared-access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: sidedoor-test-only
+          POSTGRES_DB: sidedoor_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sidedoor_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:sidedoor-test-only@127.0.0.1:5432/sidedoor_test
+      SIDEDOOR_TEST_DATABASE_URL: postgresql://postgres:sidedoor-test-only@127.0.0.1:5432/sidedoor_test
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run db:generate
+      - run: npm run db:push
+      - run: npm run test --workspace=@flight-finder/web -- src/lib/sidedoor/access/access-store.test.ts
+      - run: npm run test --workspace=@flight-finder/web -- src/lib/sidedoor/migration/platform-cutover.test.ts
+      - run: node scripts/usage-migration-test.mjs
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Build and stage the exact commit on this disposable runner
+        run: |
+          sha=$(git rev-parse HEAD)
+          docker build --build-arg COMMIT_SHA="$sha" -t flight-finder-test:latest .
+          image=$(docker image inspect --format '{{.Id}}' flight-finder-test:latest)
+          bash scripts/staging-test.sh "$image" "$sha" --keep-alive
+      - name: Browser smoke tests
+        env:
+          BROWSER_SMOKE_OWNER: integration-owner
+          BROWSER_SMOKE_PASSWORD: integration-owner-test-password
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+          bash scripts/browser-smoke-test.sh http://localhost:3399
+      - name: Fresh installer and browser access through local, LAN and HTTPS addresses
+        run: |
+          image=$(docker image inspect --format '{{.Id}}' flight-finder-test:latest)
+          node scripts/testing/installer-browser.mjs "$image"
+          node scripts/testing/installer-browser.mjs "$image" --desktop
+      - name: Historical updater bootstrap and origin migration with real browser login
+        run: |
+          image=$(docker image inspect --format '{{.Id}}' flight-finder-test:latest)
+          node scripts/testing/installer-browser.mjs "$image" --update --legacy-installer=8b8bc6e0282c62650b28c7cea2c0d1a9e815ed45
+          node scripts/testing/installer-browser.mjs "$image" --update --desktop --legacy-installer=8b8bc6e0282c62650b28c7cea2c0d1a9e815ed45
+      - name: Cleanup only this runner's test containers
+        if: always()
+        run: docker compose -p flight-finder-integration-test -f scripts/docker-compose.integration.yml down -v --remove-orphans

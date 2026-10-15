@@ -1,0 +1,25 @@
+.card {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+}
+
+.cardTitle {
+  font-size: var(--text-lg);
+  color: var(--text);
+  margin-bottom: var(--space-md);
+}
+
+.chartContainer {
+  width: 100%;
+  min-height: 300px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.empty {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}

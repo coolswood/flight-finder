@@ -1,0 +1,74 @@
+.card {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+}
+
+.cardTitle {
+  font-size: var(--text-lg);
+  color: var(--text);
+  margin-bottom: var(--space-md);
+}
+
+.stats {
+  display: flex;
+  gap: var(--space-lg);
+  margin-bottom: var(--space-md);
+  flex-wrap: wrap;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.statLabel {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.statValue {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th {
+  text-align: left;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: var(--space-sm);
+  border-bottom: 1px solid var(--border);
+}
+
+.table td {
+  padding: var(--space-sm);
+  font-size: var(--text-sm);
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+
+.table tr:last-child td {
+  border-bottom: none;
+}
+
+.empty {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.hint {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}

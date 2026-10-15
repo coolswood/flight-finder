@@ -1,0 +1,706 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Query {
+  id              String   @id @default(cuid())
+  sourceUrl       String?
+  rawInput        String
+  origin          String
+  originName      String
+  destination     String
+  destinationName String
+  dateFrom        DateTime
+  dateTo          DateTime
+  flexibility     Int      @default(0)
+  maxPrice        Float?
+  maxStops        Int?
+  maxDurationHours Int?     // optional cap on total trip duration in hours
+  preferredAirlines String[] @default([])
+  preferredAggregators String[] @default([]) // per-query override of User.preferredAggregators; empty = inherit
+  timePreference  String   @default("any")
+  strictDepartureTime Boolean @default(false)
+  cabinClass      String   @default("economy")
+  tripType        String   @default("round_trip") // 'one_way' | 'round_trip'
+  currency        String?
+  groupId         String?  // links sibling queries created from the same multi-route search
+  deleteToken     String?
+  active          Boolean  @default(true)
+  isSeed          Boolean  @default(false)
+  lookAheadDays   Int      @default(14)
+  expiresAt       DateTime
+  firstViewedAt   DateTime?
+  vpnCountries    String[] @default([]) // ISO 3166-1 codes for VPN comparison
+  label           String?
+  scrapeInterval  Int?     // hours, null = follow extractionConfig.scrapeInterval (global)
+  lastNotifiedLowPrice Float?    // price of the most recent new-low alert sent for this query (notification dedupe)
+  lastNotifiedAt       DateTime? // when that last new-low alert was sent
+  userId          String?  // owner when self-hosted multi-user is enabled; null = anonymous or seed
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  snapshots PriceSnapshot[]
+  fetchRuns FetchRun[]
+  editEvents QueryEditEvent[]
+  travelJobs TravelJob[]
+  travelAlerts TravelAlertDelivery[]
+  notificationPolicy QueryNotificationPolicy?
+  alertSettings QueryAlertSettings?
+  alertRules QueryAlertRule[]
+  user      User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([active])
+  @@index([expiresAt])
+  @@index([isSeed])
+  @@index([groupId])
+  @@index([userId])
+}
+
+model ParseJob {
+  id String @id @default(cuid())
+  ownerId String?
+  owner User? @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  capabilityHash String?
+  actorScope String
+  ipHash String
+  dedupKey String
+  status String @default("queued")
+  input Json
+  provider String
+  configFingerprint String
+  promptDate String
+  claimOwner String?
+  generation Int @default(0)
+  leaseUntil DateTime?
+  result Json?
+  error String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  expiresAt DateTime
+  queueUntil DateTime
+
+  @@index([status, createdAt])
+  @@index([actorScope, dedupKey, expiresAt])
+  @@index([ipHash, createdAt])
+  @@index([expiresAt])
+}
+
+// Retained independently of result ownership until local execution settles.
+model ParseReservation {
+  id String @id
+  jobId String @unique
+  actorScope String
+  ipHash String
+  provider String
+  claimOwner String
+  generation Int
+  leaseUntil DateTime
+  deadline DateTime
+  quarantinedAt DateTime?
+  settledAt DateTime?
+  recoveredBy String?
+  createdAt DateTime @default(now())
+
+  @@index([settledAt, provider])
+}
+
+model QueryEditEvent {
+  id        String   @id @default(cuid())
+  queryId   String
+  editedAt  DateTime @default(now())
+  userId    String?
+  summary   String
+  changes   Json
+
+  query Query @relation(fields: [queryId], references: [id], onDelete: Cascade)
+
+  @@index([queryId, editedAt])
+  @@index([userId])
+}
+
+model PriceSnapshot {
+  id                String   @id @default(cuid())
+  queryId           String
+  travelDate        DateTime
+  price             Float
+  currency          String   @default("USD")
+  airline           String
+  bookingUrl        String?
+  stops             Int      @default(0)
+  duration          String?
+  layovers          Json?    // [{ duration: "1h 35m", airport: "ORD" }] in travel order
+  flightId          String?  // stable identity: airline-(flightNumber|HHMM)-origin-dest-date
+  flightNumber      String?  // human-readable flight identifier (e.g. "DL 345")
+  departureTime     String?
+  arrivalTime       String?
+  seatsLeft         Int?
+  status            String   @default("available") // 'available' | 'sold_out'
+  airlineDirectPrice Float?
+  vpnCountry        String?  // ISO 3166-1 alpha-2 — VPN exit country during scrape
+  scrapedAt         DateTime @default(now())
+  fetchRunId        String?
+
+  query    Query     @relation(fields: [queryId], references: [id], onDelete: Cascade)
+  fetchRun FetchRun? @relation(fields: [fetchRunId], references: [id])
+
+  @@index([queryId, scrapedAt])
+  @@index([queryId, airline])
+  @@index([queryId, flightId])
+}
+
+model FetchRun {
+  id             String    @id @default(cuid())
+  queryId        String
+  status         String // 'success' | 'partial' | 'failed'
+  source         String    @default("google_flights") // 'google_flights' | 'airline_direct' | 'skyscanner' | 'kayak' | 'manual' | joined labels e.g. 'google_flights+skyscanner'
+  snapshotsCount Int       @default(0)
+  extractionCost Float?
+  vpnCountry     String?   // ISO 3166-1 alpha-2 — VPN exit country during this run
+  error          String?
+  startedAt      DateTime  @default(now())
+  completedAt    DateTime?
+  travelJobId    String?
+
+  query     Query           @relation(fields: [queryId], references: [id], onDelete: Cascade)
+  snapshots PriceSnapshot[]
+  travelJob TravelJob? @relation(fields: [travelJobId], references: [id], onDelete: SetNull)
+
+  @@index([queryId, startedAt])
+}
+
+model ExtractionConfig {
+  providerRevision     Int       @default(0)
+  id                   String    @id @default("singleton")
+  provider             String    @default("anthropic")
+  model                String    @default("claude-haiku-4-5-20251001")
+  reasoningEffort      String?   // null preserves existing CLI configuration; "default" uses model default
+  theme                String    @default("default")
+  enabled              Boolean   @default(true)
+  scrapeInterval       Int       @default(3) // hours — global default
+  defaultSearchMethod  String    @default("ai") // 'ai' | 'manual'
+  setupComplete        Boolean   @default(false)
+  communitySharing     Boolean   @default(false)
+  communityRegistrationOpen Boolean @default(false) // hub side: accept new community key registrations (opt-in). Env COMMUNITY_REGISTRATION_OPEN still works as an override.
+  communityApiKey      String?
+  lastCommunitySyncAt  DateTime?
+  defaultCurrency      String?   // ISO 4217 (EUR, GBP). null = Google auto-detects
+  defaultCountry       String?   // ISO 3166-1 alpha-2 (DE, GB). null = Google auto-detects
+  customBaseUrl        String?   // e.g. http://localhost:11434/v1
+  vpnProvider          String?   // 'none' | 'expressvpn' | 'mullvad'
+  vpnCountries         String[]  @default([]) // default VPN countries (used when query has none)
+  vpnActivationCode    String?   // encrypted VPN activation code
+  multiUserMode        Boolean   @default(false) // self-hosted only; admin manages User table for households
+  cabinAlertBaselineCutoff DateTime? // set once on the first notify cycle after the cabin-class scrape fix; non-economy queries ignore snapshots scraped before it for the new-low baseline (pre-fix snapshots are Economy fares mislabeled as the requested cabin)
+  updatedAt            DateTime  @updatedAt
+  extractTimeoutSeconds Int @default(90)
+  maxFlightsPerDate     Int @default(10) // max flights the LLM extracts per date pair; raise for busy routes
+  maxTrackedPerRoute    Int @default(10) // max flights a user can select to track per route in the picker; bounded by maxFlightsPerDate
+  previewMaxCombos      Int @default(24) // max (routes x dates) the create-time preview scrape fans out; cron does the full grid
+  aggregatorsEnabled    String[] @default(["google_flights", "airline_direct"]) // sources allowed in the fallback chain; skyscanner/kayak opt-in
+  notifyMinDropAbs      Float    @default(5)  // minimum absolute price drop (in the query's currency) to fire a new-low alert
+  notifyMinDropPct      Float    @default(0)  // minimum fractional drop (0..1) to fire a new-low alert; 0 = absolute floor only
+  publicBaseUrl         String?  // this instance's public URL for notification deep links; null = APP_URL env / default
+  anthropicRpm          Int?     // override Anthropic requests-per-minute cap; null = ANTHROPIC_RPM env / built-in default
+  googleRpm             Int?     // override Google/Gemini requests-per-minute cap; null = GOOGLE_RPM env / built-in default
+  openaiRpm             Int?     // override OpenAI requests-per-minute cap; null = OPENAI_RPM env / built-in default
+  groqRpm               Int?     // override Groq requests-per-minute cap; null = GROQ_RPM env / built-in default
+  previewConcurrency    Int?     // parallel Playwright instances for the create-time preview; null = PREVIEW_CONCURRENCY env / default
+  previewAdmissionCap   Int?     // max concurrent preview runs per client IP; null = PREVIEW_ADMISSION_CAP env / default
+}
+
+model SidedoorState {
+  id       String @id
+  revision String
+  state    Json
+}
+
+model User {
+  id                String   @id @default(cuid())
+  username          String   @unique
+  displayName       String?
+  isAdmin           Boolean  @default(false)
+  avatar            String?  // preset avatar slug (see lib/avatars.ts); null falls back to initials
+  theme             String?  // personal theme id (see lib/theme.ts); null falls back to ExtractionConfig.theme
+  defaultCurrency   String?  // override; null falls back to ExtractionConfig.defaultCurrency
+  defaultCountry    String?  // override; null falls back to ExtractionConfig.defaultCountry
+  preferredAirlines    String[] @default([])
+  preferredAggregators String[] @default([]) // ordered fallback chain after airline_direct; empty = inherit admin default
+  cabinClass        String?  // override; null falls back to "economy"
+  preferredCarProviders CarProvider[] @default([])
+  carPreferencesRevision Int @default(0)
+  hotelMapPreferences Json?
+  hotelMapPreferencesRevision Int @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  queries  Query[]
+  hotelTrackers HotelTracker[]
+  hotelSearches HotelSearchRun[]
+  carTrackers CarTracker[]
+  carSearches CarSearchRun[]
+  carCreations CarTrackerCreation[]
+  carSearchCreations CarSearchCreation[]
+  carRefreshRequests CarRefreshRequest[]
+  carParseGate CarParseGate?
+  travelJobs TravelJob[]
+  parseJobs ParseJob[]
+  channels NotificationChannel[]
+
+  @@index([isAdmin])
+}
+
+model HotelMapConfig {
+  id String @id @default("singleton")
+  revision Int @default(0)
+  settings Json
+  updatedAt DateTime @updatedAt
+}
+
+model HotelTracker {
+  id          String @id @default(cuid())
+  userId      String?
+  hotelName   String
+  search      Json
+  selection   Json
+  options     Json
+  active      Boolean @default(true)
+  targetArmed Boolean @default(true)
+  historicalLow Decimal? @db.Decimal(16, 4)
+  latestPrice Decimal? @db.Decimal(16, 4)
+  lastCheckedAt DateTime?
+  lastError   String?
+  nextCheckAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  snapshots   HotelSnapshot[]
+  runs        HotelSearchRun[]
+  alerts      HotelAlert[]
+  @@index([userId])
+  @@index([active, nextCheckAt])
+}
+
+model HotelSearchRun {
+  id          String @id @default(cuid())
+  userId      String?
+  trackerId   String?
+  request     Json
+  result      Json?
+  status      String @default("queued")
+  error       String?
+  claimedAt   DateTime?
+  heartbeatAt DateTime?
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+  user        User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tracker     HotelTracker? @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  snapshots   HotelSnapshot[]
+  travelJob   TravelJob?
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@index([trackerId, createdAt])
+}
+
+model HotelSnapshot {
+  id          String @id @default(cuid())
+  trackerId   String
+  runId       String
+  offer       Json
+  eligible    Boolean
+  scrapedAt   DateTime @default(now())
+  tracker     HotelTracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  run         HotelSearchRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  @@index([trackerId, scrapedAt])
+}
+
+model HotelAlert {
+  id           String @id @default(cuid())
+  trackerId    String
+  message      Json
+  deliveredIds String[] @default([])
+  pending      Boolean @default(true)
+  lastError    String?
+  nextAttemptAt DateTime @default(now())
+  createdAt    DateTime @default(now())
+  tracker      HotelTracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  travelDelivery TravelAlertDelivery?
+  @@index([pending, createdAt])
+  @@index([pending, nextAttemptAt])
+}
+
+model HotelLease {
+  id        String @id
+  owner     String
+  expiresAt DateTime
+}
+
+enum CarProvider {
+  discovercars
+  autoeurope
+}
+
+enum CarTrackingMode {
+  best
+  contract
+}
+
+enum CarRunStatus {
+  queued
+  running
+  success
+  partial
+  unavailable
+  failed
+  cancelled
+}
+
+model CarTracker {
+  id                 String @id @default(cuid())
+  userId             String?
+  label              String
+  search             Json
+  selection          Json?
+  mode               CarTrackingMode @default(best)
+  currency           String @db.VarChar(3)
+  active             Boolean @default(true)
+  revision           Int @default(0)
+  scrapeInterval     Int @default(3)
+  targetMinor        BigInt?
+  notifyLows         Boolean @default(true)
+  targetArmed        Boolean @default(true)
+  historicalLowMinor BigInt?
+  latestPriceMinor   BigInt?
+  lastCheckedAt      DateTime?
+  lastError          String?
+  nextCheckAt        DateTime @default(now())
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  user               User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  runs               CarSearchRun[]
+  snapshots          CarSnapshot[]
+  alerts             TravelAlertDelivery[]
+  creation           CarTrackerCreation?
+
+  @@index([userId])
+  @@index([active, nextCheckAt])
+}
+
+model CarTrackerCreation {
+  id          String @id @db.Char(64)
+  requestHash String @db.Char(64)
+  userId      String?
+  trackerId   String? @unique
+  createdAt   DateTime @default(now())
+  user        User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tracker     CarTracker? @relation(fields: [trackerId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+}
+
+model CarSearchRun {
+  id              String @id @default(cuid())
+  userId          String?
+  trackerId       String?
+  trackerRevision Int?
+  trackingClosed  Boolean @default(false)
+  request         Json
+  result          Json?
+  status          CarRunStatus @default(queued)
+  error           String?
+  createdAt       DateTime @default(now())
+  completedAt     DateTime?
+  user            User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tracker         CarTracker? @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  snapshots       CarSnapshot[]
+  travelJob       TravelJob?
+  creation        CarSearchCreation?
+  refreshRequests CarRefreshRequest[]
+
+  @@unique([id, trackerId])
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@index([trackerId, createdAt])
+}
+
+model CarSearchCreation {
+  id          String @id @db.Char(64)
+  requestHash String @db.Char(64)
+  userId      String?
+  runId       String? @unique
+  createdAt   DateTime @default(now())
+  user        User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  run         CarSearchRun? @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+}
+
+model CarParseGate {
+  id            String @id @db.Char(64)
+  userId        String? @unique
+  token         String? @db.Uuid
+  expiresAt     DateTime @default(now())
+  nextAllowedAt DateTime @default(now())
+  user          User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model CarRefreshRequest {
+  id          String @id @db.Char(64)
+  requestHash String @db.Char(64)
+  trackerId   String
+  revision    Int
+  userId      String?
+  runId       String?
+  createdAt   DateTime @default(now())
+  user        User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  run         CarSearchRun? @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([runId])
+}
+
+model CarSnapshot {
+  id           String @id @default(cuid())
+  trackerId    String
+  runId        String
+  source       CarProvider
+  offer        Json
+  currency     String @db.VarChar(3)
+  totalMinor   BigInt?
+  eligible     Boolean
+  reasons      String[] @default([])
+  contractHash String @db.Char(64)
+  observedAt   DateTime
+  tracker      CarTracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  run          CarSearchRun @relation(fields: [runId, trackerId], references: [id, trackerId], onDelete: Cascade)
+
+  @@index([trackerId, observedAt])
+  @@index([trackerId, contractHash, observedAt])
+}
+
+enum TravelJobKind {
+  flight_batch
+  flight_query
+  flight_preview
+  hotel_search
+  car_search
+}
+
+enum TravelJobStatus {
+  queued
+  running
+  succeeded
+  failed
+  cancelled
+}
+
+model TravelJob {
+  id              String @id @default(cuid())
+  kind            TravelJobKind
+  status          TravelJobStatus @default(queued)
+  userId          String?
+  queryId         String?
+  hotelRunId      String? @unique
+  carRunId        String? @unique
+  activeKey       String? @unique
+  priority        Int @default(0)
+  attempts        Int @default(0)
+  leaseResource   String?
+  leaseOwner      String?
+  leaseGeneration Int?
+  request         Json?
+  result          Json?
+  error           String?
+  createdAt       DateTime @default(now())
+  claimedAt       DateTime?
+  completedAt     DateTime?
+  cancelledAt     DateTime?
+  user            User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  query           Query? @relation(fields: [queryId], references: [id], onDelete: Cascade)
+  hotelRun        HotelSearchRun? @relation(fields: [hotelRunId], references: [id], onDelete: Cascade)
+  carRun          CarSearchRun? @relation(fields: [carRunId], references: [id], onDelete: Cascade)
+  lease           TravelLease? @relation(fields: [leaseResource], references: [id], onDelete: Restrict)
+  fetchRuns       FetchRun[]
+
+  @@index([status, priority, createdAt])
+  @@index([queryId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model TravelLease {
+  id         String @id
+  owner      String
+  generation Int @default(0)
+  expiresAt  DateTime
+  state      String @default("idle")
+  topologyVersion Int @default(0)
+  jobs       TravelJob[]
+}
+
+model TravelAdmission {
+  id                 String @id @default("singleton")
+  topologyHash       String?
+  topologyVersion    Int @default(0)
+  vpnEnabled         Boolean @default(false)
+  systemWide         Boolean @default(false)
+  quarantinedAt      DateTime?
+  quarantineReason   String?
+  cleanupRecoveryAllowed Boolean @default(false)
+  recoveryGeneration Int @default(0)
+  recoveredAt        DateTime?
+  recoveredBy        String?
+}
+
+model TravelAlertDelivery {
+  id            String @id @default(cuid())
+  queryId       String?
+  hotelAlertId  String? @unique
+  carTrackerId  String?
+  eventKey      String @unique
+  message       Json
+  deliveredIds  String[] @default([])
+  pending       Boolean @default(true)
+  lastError     String?
+  nextAttemptAt DateTime @default(now())
+  claimToken    String? @db.Uuid
+  claimExpiresAt DateTime?
+  createdAt     DateTime @default(now())
+  query         Query? @relation(fields: [queryId], references: [id], onDelete: Cascade)
+  hotelAlert    HotelAlert? @relation(fields: [hotelAlertId], references: [id], onDelete: Cascade)
+  carTracker    CarTracker? @relation(fields: [carTrackerId], references: [id], onDelete: Cascade)
+
+  @@index([pending, nextAttemptAt])
+}
+
+model QueryNotificationPolicy {
+  queryId    String @id
+  mode       String @default("inherit")
+  channelIds String[] @default([])
+  revision   Int @default(0)
+  updatedAt  DateTime @updatedAt
+  query      Query @relation(fields: [queryId], references: [id], onDelete: Cascade)
+}
+
+model QueryAlertSettings {
+  queryId  String @id
+  revision Int @default(0)
+  query    Query @relation(fields: [queryId], references: [id], onDelete: Cascade)
+}
+
+model QueryAlertRule {
+  id                String @id @default(cuid())
+  queryId           String
+  flightId          String?
+  currency          String
+  targetPrice       Float?
+  dropAbs           Float?
+  dropPct           Float?
+  enabled           Boolean @default(true)
+  cooldownMinutes   Int @default(0)
+  revision          Int @default(1)
+  baselinePrice     Float?
+  lastNotifiedPrice Float?
+  lastNotifiedAt    DateTime?
+  criteriaVersion   String
+  eventSequence     Int @default(0)
+  query             Query @relation(fields: [queryId], references: [id], onDelete: Cascade)
+
+  @@index([queryId, enabled])
+}
+
+model NotificationChannel {
+  id        String   @id @default(cuid())
+  userId    String?  // owner; null = global/admin-owned (single-user self-hosted). set = per-user (multi-user mode)
+  type      String   // 'telegram' | 'email' | 'ntfy' | 'webhook'
+  label     String?  // friendly name shown in the admin UI
+  config    Json     // per-type settings; secret fields stored encrypted (see lib/notifications/channels)
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([enabled])
+}
+
+
+model ApiUsageLog {
+  id           String   @id @default(cuid())
+  provider     String
+  model        String
+  inputTokens  Int?
+  outputTokens Int?
+  cachedInputTokens Int?
+  cacheWriteTokens Int?
+  reasoningTokens Int?
+  costUsd      Float?
+  operation    String
+  durationMs   Int
+  error        String?
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([provider])
+}
+
+model PreviewRun {
+  id             String   @id @default(cuid())
+  requestHash    String
+  status         String   @default("pending") // 'pending' | 'running' | 'completed' | 'failed'
+  requestPayload Json
+  resultPayload  Json?
+  error          String?
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  /// IP that started this run. Used by the POST handler to cap concurrent
+  /// active previews per source (issue 65 audit finding D2). Nullable so
+  /// requests behind a proxy that strips x-forwarded-for still admit.
+  clientIp       String?
+
+  @@index([status, createdAt])
+  @@index([expiresAt])
+  @@index([requestHash, status, expiresAt])
+  @@index([clientIp, status, updatedAt])
+}
+
+model CommunityApiKey {
+  id            String    @id @default(cuid())
+  apiKey        String    @unique
+  label         String?
+  active        Boolean   @default(true)
+  snapshotCount Int       @default(0)
+  lastSeenAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  snapshots CommunitySnapshot[]
+
+  @@index([active])
+}
+
+model CommunitySnapshot {
+  id          String   @id @default(cuid())
+  origin      String   // 3-letter IATA
+  destination String   // 3-letter IATA
+  travelDate  DateTime
+  price       Float
+  currency    String   @default("USD")
+  airline     String
+  stops       Int      @default(0)
+  cabinClass  String   @default("economy")
+  scrapedAt   DateTime
+  receivedAt  DateTime @default(now())
+  apiKeyId    String
+
+  apiKey CommunityApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@index([origin, destination])
+  @@index([travelDate])
+  @@index([airline])
+  @@index([apiKeyId])
+}

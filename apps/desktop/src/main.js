@@ -1,0 +1,297 @@
+// Flight Finder launcher UI. Talks to the Rust commands in src-tauri/src/lib.rs
+// via the global Tauri bridge (app.withGlobalTauri = true). Two modes, chosen on
+// first launch and remembered in localStorage:
+//   host   -- orchestrate the local Docker stack (install/start/stop/open)
+//   client -- open a remote instance (a VPS) in its own native window
+const invoke = window.__TAURI__.core.invoke;
+
+const MODE_KEY = 'ff-desktop-mode';
+let hostActionRunning = false;
+let publicLink = false;
+
+const $ = (id) => document.getElementById(id);
+const views = { chooser: $('chooser'), host: $('host'), client: $('client') };
+
+function show(view) {
+  for (const [name, el] of Object.entries(views)) el.hidden = name !== view;
+}
+
+function setMode(mode) {
+  if (mode) localStorage.setItem(MODE_KEY, mode);
+  else localStorage.removeItem(MODE_KEY);
+  route();
+}
+
+function route() {
+  const mode = localStorage.getItem(MODE_KEY);
+  if (mode === 'host') {
+    show('host');
+    refreshHost();
+  } else if (mode === 'client') {
+    show('client');
+    initClient();
+  } else {
+    show('chooser');
+  }
+}
+
+$('choose-host').addEventListener('click', () => setMode('host'));
+$('choose-client').addEventListener('click', () => setMode('client'));
+document
+  .querySelectorAll('[data-switch]')
+  .forEach((b) => b.addEventListener('click', () => setMode(null)));
+
+// ---- Host mode ----
+const host = {
+  dot: $('dot'),
+  text: $('status-text'),
+  actions: $('host-actions'),
+  install: $('install'),
+  start: $('start'),
+  stop: $('stop'),
+  restart: $('restart'),
+  open: $('open'),
+  configHint: $('config-hint'),
+  needsDocker: $('needs-docker'),
+  reach: $('reach'),
+  reachInfo: $('reach-info'),
+};
+
+function setStatus(state, text) {
+  host.dot.className = `dot dot-${state}`;
+  host.text.textContent = text;
+}
+
+async function refreshHost() {
+  if (hostActionRunning) return;
+  try {
+  const [hasDocker, isInstalled] = await Promise.all([
+    invoke('docker_available'),
+    invoke('installed'),
+  ]);
+  host.needsDocker.hidden = hasDocker;
+  host.actions.hidden = !hasDocker;
+  host.reach.hidden = true; // re-shown below only when the stack is healthy
+  host.restart.hidden = true; // re-shown below only when the stack is healthy
+  host.configHint.hidden = true; // only meaningful once installed
+  if (!hasDocker) return setStatus('idle', 'Docker not found');
+
+  if (!isInstalled) {
+    setStatus('idle', 'Not installed yet');
+    host.install.hidden = false;
+    host.start.hidden = true;
+    host.stop.hidden = true;
+    host.open.hidden = true;
+    return;
+  }
+
+  host.install.hidden = true;
+  // Once installed, point the user at the .env they edit and restart to apply.
+  host.configHint.hidden = false;
+  const healthy = await invoke('is_healthy');
+  // The reach choices only make sense once the instance is actually up.
+  host.reach.hidden = !healthy;
+  if (healthy) {
+    const connection = await invoke('connection');
+    if (!publicLink) {
+      selectReach(connection.localOnly ? 'local' : 'lan');
+      host.reachInfo.textContent = connection.localOnly
+        ? 'Only this computer can reach it.'
+        : 'Devices on your local network can reach this instance.';
+    }
+    setStatus('up', 'Running');
+    host.start.hidden = true;
+    host.stop.hidden = false;
+    host.restart.hidden = false;
+    host.open.hidden = false;
+  } else {
+    setStatus('idle', 'Stopped');
+    host.start.hidden = false;
+    host.stop.hidden = true;
+    host.open.hidden = true;
+  }
+  } catch (error) {
+    setStatus('idle', 'Could not check the instance');
+    $('host-error').textContent = String(error);
+    host.reach.hidden = true;
+  }
+}
+
+async function waitHealthy() {
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    if (await invoke('is_healthy')) return true;
+  }
+  throw new Error('The instance did not become healthy. Check its logs, then retry.');
+}
+
+host.install.addEventListener('click', async () => {
+  if (hostActionRunning) return;
+  hostActionRunning = true; $('host-error').textContent = '';
+  setStatus('working', 'Installing… first run pulls images, this can take a few minutes');
+  host.install.disabled = true;
+  try {
+    await invoke('install_stack');
+    await waitHealthy();
+  } catch (e) {
+    $('host-error').textContent = `Install failed: ${e}`;
+  } finally {
+    host.install.disabled = false;
+    hostActionRunning = false;
+    refreshHost();
+  }
+});
+
+host.start.addEventListener('click', async () => {
+  if (hostActionRunning) return;
+  hostActionRunning = true; $('host-error').textContent = '';
+  setStatus('working', 'Starting…');
+  host.start.disabled = true;
+  try {
+    await invoke('start_stack');
+    await waitHealthy();
+  } catch (e) {
+    $('host-error').textContent = `Could not start: ${e}`;
+  } finally {
+    host.start.disabled = false;
+    hostActionRunning = false;
+    refreshHost();
+  }
+});
+
+host.stop.addEventListener('click', async () => {
+  if (hostActionRunning) return;
+  hostActionRunning = true; $('host-error').textContent = '';
+  setStatus('working', 'Stopping…');
+  try {
+    await invoke('stop_stack');
+    publicLink = false;
+  } catch (e) {
+    $('host-error').textContent = `Could not stop: ${e}`;
+  } finally {
+    hostActionRunning = false; refreshHost();
+  }
+});
+
+host.restart.addEventListener('click', async () => {
+  if (hostActionRunning) return;
+  hostActionRunning = true; $('host-error').textContent = '';
+  setStatus('working', 'Restarting…');
+  host.restart.disabled = true;
+  try {
+    await invoke('stop_tunnel');
+    publicLink = false; hideReachButtons();
+    // Recreates the containers so an edited .env is reloaded (a plain start
+    // would not pick up env_file changes).
+    await invoke('restart_stack');
+    await waitHealthy();
+  } catch (e) {
+    $('host-error').textContent = `Restart failed: ${e}`;
+  } finally {
+    host.restart.disabled = false;
+    hostActionRunning = false;
+    refreshHost();
+  }
+});
+
+host.open.addEventListener('click', () => invoke('open_app').catch(error => { $('host-error').textContent = String(error); }));
+
+// Reachability: consent-first. "This computer only" is the default; nothing is
+// exposed unless the user picks LAN or a public tunnel.
+const reachConfirm = $('reach-confirm');
+const reachStop = $('reach-stop');
+
+function selectReach(choice) {
+  document.querySelectorAll('.reach-opt').forEach((b) => {
+    b.classList.toggle('reach-active', b.dataset.reach === choice);
+  });
+}
+
+function hideReachButtons() {
+  reachConfirm.hidden = true;
+  reachStop.hidden = true;
+}
+
+async function changeReach(localOnly) {
+  if (hostActionRunning) return;
+  hostActionRunning = true; $('host-error').textContent = '';
+  try {
+    await invoke('set_reach', { localOnly });
+    publicLink = false; selectReach(localOnly ? 'local' : 'lan'); hideReachButtons();
+    const url = localOnly ? null : await invoke('lan_url');
+    host.reachInfo.textContent = localOnly ? 'Only this computer can reach it.'
+      : url ? `On your local network: ${url}` : 'Local network access is enabled. Could not determine its address.';
+  } catch (error) { $('host-error').textContent = String(error); }
+  finally { hostActionRunning = false; }
+}
+document.querySelector('[data-reach="local"]').addEventListener('click', () => changeReach(true));
+document.querySelector('[data-reach="lan"]').addEventListener('click', () => changeReach(false));
+
+// Two-step, in-app consent (Tauri's webview has no window.confirm).
+document.querySelector('[data-reach="public"]').addEventListener('click', () => {
+  if (hostActionRunning) return;
+  selectReach('public');
+  reachStop.hidden = true;
+  reachConfirm.hidden = false;
+  host.reachInfo.textContent =
+    'Opens a temporary PUBLIC https URL to this computer. Anyone with the link can reach it until you stop it. Click "Open public link" to confirm.';
+});
+
+reachConfirm.addEventListener('click', async () => {
+  if (hostActionRunning) return;
+  hostActionRunning = true; $('host-error').textContent = '';
+  reachConfirm.hidden = true;
+  host.reachInfo.textContent = 'Opening a public link…';
+  try {
+    const url = await invoke('start_tunnel');
+    publicLink = true;
+    host.reachInfo.textContent = `Public link: ${url}. Open it on your phone, then Add to Home Screen.`;
+    reachStop.hidden = false;
+  } catch (e) {
+    $('host-error').textContent = String(e);
+  } finally { hostActionRunning = false; }
+});
+
+reachStop.addEventListener('click', async () => {
+  if (hostActionRunning) return;
+  hostActionRunning = true; $('host-error').textContent = '';
+  try {
+    await invoke('stop_tunnel'); publicLink = false; hideReachButtons();
+  } catch (error) { $('host-error').textContent = String(error); }
+  finally { hostActionRunning = false; await refreshHost(); }
+});
+
+// ---- Client mode ----
+const client = { url: $('server-url'), connect: $('connect'), error: $('client-error') };
+let clientInited = false;
+
+async function initClient() {
+  if (clientInited) return;
+  clientInited = true;
+  const saved = await invoke('load_server');
+  if (saved) client.url.value = saved;
+}
+
+client.connect.addEventListener('click', async () => {
+  client.error.hidden = true;
+  const url = client.url.value.trim();
+  if (!/^https?:\/\//i.test(url)) {
+    client.error.textContent = 'Enter a full URL starting with http:// or https://';
+    client.error.hidden = false;
+    return;
+  }
+  try {
+    await invoke('save_server', { url });
+    await invoke('open_client', { url });
+  } catch (e) {
+    client.error.textContent = String(e);
+    client.error.hidden = false;
+  }
+});
+
+// Keep the host status fresh while that view is showing.
+setInterval(() => {
+  if (localStorage.getItem(MODE_KEY) === 'host' && !views.host.hidden) refreshHost();
+}, 5000);
+
+route();

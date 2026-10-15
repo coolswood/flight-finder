@@ -1,0 +1,23 @@
+.toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.toggle:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}

@@ -1,0 +1,96 @@
+#!/usr/bin/env node
+// Use Commander's named export in both source and bundled entrypoints.
+import { program } from 'commander';
+import { render } from 'ink';
+import React from 'react';
+import { App } from './app.js';
+import { launchTmuxView } from './lib/tmux-view.js';
+import { registerHotelCommands } from './lib/hotel-cli.js';
+import { registerCarCommands } from './lib/car-cli.js';
+import { registerAccessCommands } from './lib/access-cli.js';
+import { registerParseCommand } from './lib/parsing/command.js';
+
+const hotelCommandHandled = registerHotelCommands(program);
+const carCommandHandled = registerCarCommands(program);
+registerAccessCommands(program);
+const parseCommandHandled = registerParseCommand(program);
+
+program
+  .name('flightfinder')
+  .description('The price trail airlines don\'t show you')
+  .option('--headless', 'Terminal UI mode (required for CLI interaction)')
+  .option('--list', 'Show all tracked queries (web) or with --headless (terminal)')
+  .option('--view <id>', 'View price chart (web) or with --headless (terminal)')
+  .option('--tmux', 'Split grouped routes into tmux panes (requires --headless --view)')
+  .option('--json', 'Output JSON: with --view <id> one tracker, otherwise the full list')
+  .option('--backend <provider>', 'AI backend: claude-code, codex, anthropic, openai, google')
+  .option('--model <model>', 'Model override (e.g. sonnet, opus, gpt-4.1-mini, codex)')
+  .option('--parse-mode <mode>', 'Interactive parsing: sync or async', 'sync')
+  .action(runFlightCommand);
+
+
+async function runFlightCommand(): Promise<void> {
+  const opts = program.opts<{ headless?: boolean; list?: boolean; view?: string; tmux?: boolean; json?: boolean; backend?: string; model?: string; parseMode: string }>();
+  try {
+    if (opts.tmux && !opts.headless) throw new Error('--tmux requires --headless mode');
+    if (opts.tmux && !opts.view) throw new Error('--tmux requires --view <id>');
+    if (!['sync', 'async'].includes(opts.parseMode)) throw new Error('--parse-mode must be sync or async');
+    if (opts.parseMode === 'async' && (!opts.headless || opts.list || opts.view || opts.json)) throw new Error('--parse-mode async requires the interactive --headless search');
+    if (opts.backend) {
+      process.env.FLIGHT_FINDER_BACKEND = opts.backend;
+      const defaultModels: Record<string, string> = {
+        'claude-code': 'sonnet',
+        codex: 'codex',
+        anthropic: 'claude-haiku-4-5-20251001',
+        openai: 'gpt-4.1-mini',
+        google: 'gemini-2.0-flash',
+      };
+      const model = opts.model ?? defaultModels[opts.backend] ?? opts.backend;
+      const { prisma } = await import('@/lib/prisma');
+      try {
+        await prisma.extractionConfig.upsert({
+          where: { id: 'singleton' },
+          update: { provider: opts.backend, model },
+          create: { id: 'singleton', provider: opts.backend, model, enabled: true, scrapeInterval: 3 },
+        });
+      } finally {
+        await prisma.$disconnect();
+      }
+    }
+
+    if (opts.json) {
+      const { runJson } = await import('./lib/json-output.js');
+      await runJson({ view: opts.view });
+      return;
+    }
+    if (opts.headless) {
+      if (opts.view && opts.tmux) await launchTmuxView(opts.view);
+      else {
+        const mode = opts.list ? 'list' as const : opts.view ? 'view' as const : 'search' as const;
+        if (opts.parseMode === 'async') {
+          const { runAsyncWizard } = await import('./lib/parsing/wizard.js');
+          await runAsyncWizard();
+        } else render(<App mode={mode} viewId={opts.view} />);
+      }
+      return;
+    }
+    if (opts.view || opts.list) {
+      const baseUrl = process.env.FLIGHT_FINDER_URL
+        ?? `http://localhost:${process.env.HOST_PORT ?? process.env.PORT ?? '3003'}`;
+      const url = opts.view ? `${baseUrl}/q/${encodeURIComponent(opts.view)}` : `${baseUrl}/admin/queries`;
+      console.log(`Opening ${url} in browser...`);
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      await promisify(execFile)('open', [url]);
+      return;
+    }
+    program.help();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(opts.json ? JSON.stringify({ error: message }) : `Error: ${message}`);
+    process.exitCode = 1;
+  }
+}
+
+await program.parseAsync();
+if (hotelCommandHandled() || carCommandHandled() || parseCommandHandled()) process.exit(process.exitCode ?? 0);

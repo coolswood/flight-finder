@@ -1,0 +1,74 @@
+.root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.loading {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.pickerTitle {
+  font-family: var(--font-display);
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--text);
+  text-align: center;
+  margin: 0 0 2rem;
+}
+
+.profiles {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1.75rem;
+  max-width: 640px;
+  margin-bottom: 1.5rem;
+}
+
+.profile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem;
+  background: none;
+  border: 2px solid transparent;
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+
+.profile:hover {
+  transform: translateY(-3px);
+  border-color: var(--accent);
+}
+
+.profile:disabled {
+  cursor: default;
+  opacity: 0.55;
+  transform: none;
+  border-color: transparent;
+}
+
+.profileName {
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  color: var(--text);
+}
+
+.profileRole {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.error {
+  font-size: 0.8125rem;
+  color: var(--price-up);
+  text-align: center;
+}

@@ -1,0 +1,208 @@
+.root {
+  width: 100%;
+}
+
+.countryHeader {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 0.75rem 0 0.25rem;
+  margin-top: 0.5rem;
+  border-bottom: 1px solid rgba(6, 182, 212, 0.15);
+}
+
+.title {
+  font-family: var(--font-display);
+  font-size: 0.875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  margin-bottom: 0.75rem;
+}
+
+.tableWrapper {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.table th {
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  font-family: var(--font-display);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.table td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table tbody tr:hover {
+  background: var(--surface);
+}
+
+.date {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.price {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.times {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.stops {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.layover {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--text-tertiary, var(--text-secondary));
+  opacity: 0.8;
+  white-space: nowrap;
+}
+
+.trendUp {
+  color: var(--price-up);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.trendDown {
+  color: var(--price-down);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.trendStable {
+  color: var(--price-stable);
+}
+
+.bookLink {
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.bookLink:hover {
+  text-decoration: underline;
+}
+
+.seats {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.seatsLow {
+  color: var(--price-up);
+  font-weight: 600;
+}
+
+.seatsNormal {
+  color: var(--text-secondary);
+}
+
+.soldOut {
+  color: var(--price-up);
+  font-weight: 600;
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.soldOutLabel {
+  color: var(--muted);
+}
+
+/* One country section: a "latest check" snapshot table, a toggle, and the
+   full chronological log below it when expanded. */
+.section {
+  margin-bottom: 0.5rem;
+}
+
+.flightChoices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.flightChoices label {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  overflow-wrap: anywhere;
+}
+
+.caption {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--muted);
+  padding: 0.5rem 0 0.4rem;
+}
+
+.historyToggle {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  padding: 0.5rem 0;
+  margin: 0;
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+}
+
+.historyToggle:hover {
+  text-decoration: underline;
+}
+
+.truncationNote {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--muted);
+  text-align: center;
+  font-style: italic;
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": [
+        "scripts/**/*.{ts,mts,mjs,cjs,js}!",
+        "seed-cli-credentials.mjs!",
+        "prisma.config.ts"
+      ]
+    },
+    "apps/web": {
+      "entry": [
+        "public/**/*.js!",
+        "src/test/**/*.{ts,tsx}"
+      ]
+    },
+    "apps/desktop": {
+      "entry": [
+        "src/main.js!",
+        "tests/**/*.mjs"
+      ]
+    },
+    "packages/cli": {
+      "entry": [
+        "register.mjs!",
+        "generated-client.mjs!",
+        "alias-loader.mjs!",
+        "demo/**/*.ts!",
+        "src/lib/{prisma,redis,secret-crypto,cabin-class,limits}.ts!",
+        "src/e2e-test.ts",
+        "src/lib/sidedoor/providers/provider-credentials.ts!"
+      ]
+    }
+  }
+}

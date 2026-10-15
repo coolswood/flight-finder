@@ -1,0 +1,202 @@
+{
+  "runLabel": "multi-process",
+  "startedAt": "2026-10-15T10:54:45.860Z",
+  "env": {
+    "BROWSER_SINGLE_PROCESS": "false",
+    "CHROME_PATH": "/usr/bin/chromium-browser",
+    "launchArgs": [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-software-rasterizer",
+      "--disable-blink-features=AutomationControlled",
+      "--disable-infobars",
+      "--window-size=1440,900",
+      "--use-gl=angle",
+      "--use-angle=swiftshader",
+      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+      "--enforce-webrtc-ip-permission-check"
+    ]
+  },
+  "versions": {
+    "node": "v26.11.1",
+    "playwright": "1.62.1",
+    "chromium": "152.0.7977.82"
+  },
+  "search": {
+    "destination": "Tbilisi",
+    "dateMode": "fixed",
+    "checkIn": "2026-11-24",
+    "checkOut": "2026-11-27",
+    "flexibility": 0,
+    "minNights": 3,
+    "maxNights": 3,
+    "rooms": [
+      {
+        "adults": 2,
+        "children": []
+      }
+    ],
+    "currency": "EUR",
+    "sources": [
+      "google_hotels"
+    ],
+    "filters": {
+      "maxTotal": null,
+      "refundable": false,
+      "breakfast": false,
+      "minStars": 0,
+      "minRating": 0,
+      "excludedSellers": [],
+      "amenities": []
+    }
+  },
+  "phases": [
+    {
+      "phase": "discovery",
+      "startedAt": "2026-10-15T10:54:45.863Z",
+      "searchPageBasis": "",
+      "error": null,
+      "captcha": false,
+      "links": 18,
+      "candidates": [
+        "https://www.google.com/travel/search?q=hotels%20in%20Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MidDaGtJbDhqZXgtSGs5OGRXR2cwdlp5OHhNWFppYzIxM1ozSnFFQUU4AA&hl=en&gl=gb&curr=EUR&ved=2ahUKEwib__eE7ruXAxWiWJEFHRN3OP0QssMEegQIAxAy&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz",
+        "https://www.google.com/travel/search?q=hotels%20in%20Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MihDaG9JdTY3XzlaQ2dodHFsQVJvTkwyY3ZNVEZ5ZWpKM2N6bHhNaEFCOAA&hl=en&gl=gb&curr=EUR&ved=2ahUKEwib__eE7ruXAxWiWJEFHRN3OP0QssMEegQIAxBP&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz",
+        "https://www.google.com/travel/search?q=hotels%20in%20Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MihDaG9JbHVfWGliM1RsT1NOQVJvTkwyY3ZNVEYyTkRodFgxOXJaeEFCOAA&hl=en&gl=gb&curr=EUR&ved=2ahUKEwib__eE7ruXAxWiWJEFHRN3OP0QssMEegQIAxBp&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz",
+        "https://www.google.com/travel/search?q=hotels%20in%20Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MihDaG9Jb2RuTWc5WHhvS3pRQVJvTkwyY3ZNVEZvTVcxc01XNW5jUkFCOAA&hl=en&gl=gb&curr=EUR&ved=2ahUKEwib__eE7ruXAxWiWJEFHRN3OP0QssMEegUIAxCGAQ&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz"
+      ],
+      "finalUrl": "https://www.google.com/travel/search?q=hotels%20in%20Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=OAA&hl=en&gl=gb&curr=EUR&ved=0CAAQ5JsGahcKEwiQ7YWG7ruXAxUAAAAAHQAAAAAQBA"
+    },
+    {
+      "phase": "property",
+      "index": 0,
+      "propertyUrl": "https://www.google.com/travel/search?q=hotels%20in%20Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MidDaGtJbDhqZXgtSGs5OGRXR2cwdlp5OHhNWFppYzIxM1ozSnFFQUU4AA&hl=en&gl=gb&curr=EUR&ved=2ahUKEwib__eE7ruXAxWiWJEFHRN3OP0QssMEegQIAxAy&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz",
+      "startedAt": "2026-10-15T10:54:56.991Z",
+      "requestedUrl": "https://www.google.com/travel/search?q=Tbilisi+November+24%2C+2026+to+November+27%2C+2026+2+adults+1+rooms&qs=MidDaGtJbDhqZXgtSGs5OGRXR2cwdlp5OHhNWFppYzIxM1ozSnFFQUU4AA&hl=en&gl=gb&curr=EUR&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz",
+      "finalUrl": "https://www.google.com/travel/search?q=Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MidDaGtJbDhqZXgtSGs5OGRXR2cwdlp5OHhNWFppYzIxM1ozSnFFQUU4AA&hl=en&gl=gb&curr=EUR&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz&ved=0CAAQ5JsGahcKEwjIjKGK7ruXAxUAAAAAHQAAAAAQBg",
+      "basis": "Stay totalPrice for 3 nights with taxes + fees",
+      "error": null,
+      "captcha": false,
+      "durationMs": 10061,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "viewport": [
+          1680,
+          1050
+        ],
+        "screen": [
+          1680,
+          1050
+        ],
+        "devicePixelRatio": 1,
+        "timezone": "Europe/London",
+        "locale": "en-GB",
+        "languages": [
+          "en-GB",
+          "en"
+        ],
+        "geolocationPermission": "requested via context permissions"
+      },
+      "tracePath": "/tmp/ff-traces-multi/trace-00-OK.zip"
+    },
+    {
+      "phase": "property",
+      "index": 1,
+      "propertyUrl": "https://www.google.com/travel/search?q=hotels%20in%20Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MihDaG9JdTY3XzlaQ2dodHFsQVJvTkwyY3ZNVEZ5ZWpKM2N6bHhNaEFCOAA&hl=en&gl=gb&curr=EUR&ved=2ahUKEwib__eE7ruXAxWiWJEFHRN3OP0QssMEegQIAxBP&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz",
+      "startedAt": "2026-10-15T10:55:07.241Z",
+      "requestedUrl": "https://www.google.com/travel/search?q=Tbilisi+November+24%2C+2026+to+November+27%2C+2026+2+adults+1+rooms&qs=MihDaG9JdTY3XzlaQ2dodHFsQVJvTkwyY3ZNVEZ5ZWpKM2N6bHhNaEFCOAA&hl=en&gl=gb&curr=EUR&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz",
+      "finalUrl": "https://www.google.com/travel/search?q=Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MihDaG9JdTY3XzlaQ2dodHFsQVJvTkwyY3ZNVEZ5ZWpKM2N6bHhNaEFCOAA&hl=en&gl=gb&curr=EUR&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz&ved=0CAAQ5JsGahcKEwiwiJaP7ruXAxUAAAAAHQAAAAAQBg",
+      "basis": "Stay totalPrice for 3 nights with taxes + fees",
+      "error": null,
+      "captcha": false,
+      "durationMs": 10262,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "viewport": [
+          1366,
+          768
+        ],
+        "screen": [
+          1366,
+          768
+        ],
+        "devicePixelRatio": 1,
+        "timezone": "Europe/London",
+        "locale": "en-GB",
+        "languages": [
+          "en-GB",
+          "en"
+        ],
+        "geolocationPermission": "requested via context permissions"
+      },
+      "tracePath": "/tmp/ff-traces-multi/trace-01-OK.zip"
+    },
+    {
+      "phase": "property",
+      "index": 2,
+      "propertyUrl": "https://www.google.com/travel/search?q=hotels%20in%20Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MihDaG9JbHVfWGliM1RsT1NOQVJvTkwyY3ZNVEYyTkRodFgxOXJaeEFCOAA&hl=en&gl=gb&curr=EUR&ved=2ahUKEwib__eE7ruXAxWiWJEFHRN3OP0QssMEegQIAxBp&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz",
+      "startedAt": "2026-10-15T10:55:17.718Z",
+      "requestedUrl": "https://www.google.com/travel/search?q=Tbilisi+November+24%2C+2026+to+November+27%2C+2026+2+adults+1+rooms&qs=MihDaG9JbHVfWGliM1RsT1NOQVJvTkwyY3ZNVEYyTkRodFgxOXJaeEFCOAA&hl=en&gl=gb&curr=EUR&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz",
+      "finalUrl": "https://www.google.com/travel/search?q=Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MihDaG9JbHVfWGliM1RsT1NOQVJvTkwyY3ZNVEYyTkRodFgxOXJaeEFCOAA&hl=en&gl=gb&curr=EUR&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz&ved=0CAAQ5JsGahcKEwjI8YuU7ruXAxUAAAAAHQAAAAAQBQ",
+      "basis": "Stay totalPrice for 3 nights with taxes + fees",
+      "error": null,
+      "captcha": false,
+      "durationMs": 9875,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "viewport": [
+          1366,
+          768
+        ],
+        "screen": [
+          1366,
+          768
+        ],
+        "devicePixelRatio": 1,
+        "timezone": "Europe/London",
+        "locale": "en-GB",
+        "languages": [
+          "en-GB",
+          "en"
+        ],
+        "geolocationPermission": "requested via context permissions"
+      },
+      "tracePath": "/tmp/ff-traces-multi/trace-02-OK.zip"
+    },
+    {
+      "phase": "property",
+      "index": 3,
+      "propertyUrl": "https://www.google.com/travel/search?q=hotels%20in%20Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MihDaG9Jb2RuTWc5WHhvS3pRQVJvTkwyY3ZNVEZvTVcxc01XNW5jUkFCOAA&hl=en&gl=gb&curr=EUR&ved=2ahUKEwib__eE7ruXAxWiWJEFHRN3OP0QssMEegUIAxCGAQ&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz",
+      "startedAt": "2026-10-15T10:55:27.797Z",
+      "requestedUrl": "https://www.google.com/travel/search?q=Tbilisi+November+24%2C+2026+to+November+27%2C+2026+2+adults+1+rooms&qs=MihDaG9Jb2RuTWc5WHhvS3pRQVJvTkwyY3ZNVEZvTVcxc01XNW5jUkFCOAA&hl=en&gl=gb&curr=EUR&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz",
+      "finalUrl": "https://www.google.com/travel/search?q=Tbilisi%20November%2024%2C%202026%20to%20November%2027%2C%202026%202%20adults%201%20rooms&qs=MihDaG9Jb2RuTWc5WHhvS3pRQVJvTkwyY3ZNVEZvTVcxc01XNW5jUkFCOAA&hl=en&gl=gb&curr=EUR&ts=CAEaMwoVEhMKCC9tLzBibTRqOgdUYmlsaXNpEhoSFAoHCOoPEAsYGBIHCOoPEAsYGxgDMgIIASoHCgU6A0VVUg&ap=ugEGcHJpY2Vz&ved=0CAAQ5JsGahcKEwjwioyZ7ruXAxUAAAAAHQAAAAAQBQ",
+      "basis": "Stay totalPrice for 3 nights with taxes + fees",
+      "error": null,
+      "captcha": false,
+      "durationMs": 11725,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "viewport": [
+          1280,
+          800
+        ],
+        "screen": [
+          1280,
+          800
+        ],
+        "devicePixelRatio": 1,
+        "timezone": "Europe/London",
+        "locale": "en-GB",
+        "languages": [
+          "en-GB",
+          "en"
+        ],
+        "geolocationPermission": "requested via context permissions"
+      },
+      "tracePath": "/tmp/ff-traces-multi/trace-03-OK.zip"
+    }
+  ],
+  "finishedAt": "2026-10-15T10:55:39.782Z",
+  "failures": 0
+}

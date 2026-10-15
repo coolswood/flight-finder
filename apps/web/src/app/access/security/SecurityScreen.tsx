@@ -1,0 +1,45 @@
+'use client';
+
+import { AccessSecurity, type AccessSecurityCopy } from 'thesidedoor/react';
+import 'thesidedoor/styles.css';
+import { useTranslations } from 'next-intl';
+import styles from '../page.module.css';
+
+export function SecurityScreen({ hosted }: { hosted: boolean }) {
+  const t = useTranslations('SharedSecurity');
+  const access = useTranslations('SharedAccess');
+  const errors: Record<string, string> = {
+    unauthorized: access('unauthorized'), forbidden: access('forbidden'),
+    conflict: access('conflict'), rate_limited: access('rate_limited'),
+    cancelled: access('cancelled'), ceremony_busy: access('ceremony_busy'),
+    passkey_failed: access('passkey_failed'),
+    outcome_unknown: access('outcome_unknown'), network_error: access('network_error'),
+    invalid_password: access('invalid_password'),
+  };
+  const copy: AccessSecurityCopy = {
+    householdTitle: t('householdTitle'), householdHint: t('householdHint'),
+    passkeysHint: t('passkeysHint'), enrollPasskey: t('enrollPasskey'),
+    confirmHouseholdPassword: t('confirmHouseholdPassword'), defaultPasskeyName: t('defaultPasskeyName'),
+    continueToProfiles: t('continueToProfiles'), householdPasswordTitle: t('householdPasswordTitle'),
+    householdPasswordHint: t('householdPasswordHint'), sessionsHint: t('sessionsHint'),
+    otherSessions: t('otherSessions'), savedBrowser: t('savedBrowser'), passwordManagerName: 'Flight Finder',
+    title: t('title'), verify: t('verify'), currentPassword: t('currentPassword'),
+    verifyPassword: t('verifyPassword'), verifyPasskey: t('verifyPasskey'),
+    passkeys: t('passkeys'), householdPasskeys: t('householdPasskeys'), passkeyName: t('passkeyName'), addPasskey: t('addPasskey'),
+    remove: t('remove'), removeHint: t('removeHint'), recovery: t('recovery'),
+    generateCodes: t('generateCodes'), recoveryHint: t('recoveryHint'), hideCodes: t('hideCodes'),
+    password: t('password'), changePassword: t('changePassword'), sessions: t('sessions'),
+    thisSession: t('thisSession'), signOut: t('signOut'), empty: t('empty'),
+    completed: t('completed'), refreshFailed: t('refreshFailed'),
+    working: access('working'), signIn: access('login'), passkeyUnavailable: access('passkeyUnavailable'),
+    error: code => errors[code] ?? access('failed'),
+  };
+  return <main className={styles.root}>
+    <div className={styles.content}>
+      <p className={styles.brand}>Flight Finder</p>
+      <AccessSecurity copy={copy} showRecoveryCodes={hosted} classes={{ root: styles.access, form: styles.form, label: styles.label, input: styles.input, button: styles.button, secondary: styles.secondary, error: styles.error, hint: styles.hint }}
+        onSignInRequired={() => window.location.assign('/access?next=%2Faccess%2Fsecurity')}
+        onHouseholdEntered={() => window.location.assign('/login?next=%2Faccess%2Fsecurity')} />
+    </div>
+  </main>;
+}

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Short alias for demo recordings
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
+exec node --import tsx --import ./packages/cli/register.mjs packages/cli/src/index.tsx "$@"

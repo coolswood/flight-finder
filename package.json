@@ -1,0 +1,51 @@
+{
+  "name": "flight-finder",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "packages/cli"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=@flight-finder/web",
+    "build": "npm run build --workspace=@flight-finder/web",
+    "lint": "npm run lint --workspace=@flight-finder/web && npm run lint --workspace=@flight-finder/cli",
+    "typecheck": "npm run typecheck --workspace=@flight-finder/web && npm run typecheck --workspace=@flight-finder/cli",
+    "test": "npm run test --workspace=@flight-finder/web && npm run test --workspace=@flight-finder/cli",
+    "cli": "node --import tsx --import ./packages/cli/register.mjs packages/cli/src/index.tsx --headless",
+    "cli:dev": "npm run dev --workspace=@flight-finder/cli",
+    "ci": "npm run lint && npm run typecheck && npm run test && npm run build && npm run build --workspace=@flight-finder/cli",
+    "db:push": "npm run cli -- access prepare && npx prisma db push --accept-data-loss --schema=apps/web/prisma/schema.prisma && node scripts/apply-travel-constraints.mjs && npm run cli -- access finalize",
+    "db:generate": "npx prisma generate --schema=apps/web/prisma/schema.prisma",
+    "db:migrate": "npx prisma migrate deploy --schema=apps/web/prisma/schema.prisma"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "version": "0.15.0",
+  "overrides": {
+    "@prisma/config": {
+      "deepmerge-ts": "8.0.2"
+    },
+    "prisma": {
+      "mysql2": "3.24.2"
+    },
+    "tsup": {
+      "esbuild": "0.28.2"
+    }
+  },
+  "dependencies": {
+    "proper-lockfile": "4.1.2"
+  },
+  "devDependencies": {
+    "@prisma/client": "7.10.0",
+    "csv-parse": "7.0.3",
+    "geo-tz": "8.1.9",
+    "knip": "6.39.0",
+    "pg": "8.23.1",
+    "playwright": "1.63.0",
+    "prisma": "7.10.0",
+    "react": "19.3.0",
+    "tsup": "8.5.1",
+    "tsx": "^4.23.15"
+  }
+}

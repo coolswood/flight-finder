@@ -1,0 +1,943 @@
+/**
+ * Tests for the runPreview worker pool: parallelism gate, heartbeat
+ * callback, output ordering, and the extractionConfig hoist invariant.
+ * scrapeRoute is intercepted by mocking its three dependencies
+ * (navigate*, extractPrices, prisma) plus the cached wrapper so the test
+ * controls timing without touching the network or a real Prisma client.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PreviewRequestPayload } from '@/lib/preview-run';
+import type { ExtractionConfig, TravelJob } from '@/generated/prisma/client';
+import { withTravelContext } from './travel/context';
+import { TravelVpnSession } from './travel/vpn';
+import type { createStateBoundary } from '@/test/state-fixture';
+
+const persistence = vi.hoisted(() => ({ state: null as ReturnType<typeof createStateBoundary> | null, config: null as Record<string, unknown> | null }));
+vi.mock('@/lib/sidedoor/access/store', async () => {
+  const { createStateBoundary } = await import('@/test/state-fixture');
+  persistence.state = createStateBoundary();
+  return { sharedStateStore: persistence.state.store };
+});
+
+const {
+  mockExtractionConfigFindFirst,
+  mockApiUsageLogCreate,
+  mockExtractPrices,
+  mockNavigateGoogleFlights,
+  mockNavigateAirlineDirect,
+  mockWriteFile,
+  mockMkdir,
+  mockRedisEval,
+  mockRedisIncr,
+  mockRedisDecr,
+  mockRedisExpire,
+  mockRedisSet,
+  cachedPrices,
+} = vi.hoisted(() => ({
+  mockExtractionConfigFindFirst: vi.fn(),
+  mockApiUsageLogCreate: vi.fn().mockResolvedValue({}),
+  mockExtractPrices: vi.fn(),
+  mockNavigateGoogleFlights: vi.fn(),
+  mockNavigateAirlineDirect: vi.fn(),
+  mockWriteFile: vi.fn().mockResolvedValue(undefined),
+  mockMkdir: vi.fn().mockResolvedValue(undefined),
+  mockRedisEval: vi.fn(),
+  mockRedisIncr: vi.fn(),
+  mockRedisDecr: vi.fn(),
+  mockRedisExpire: vi.fn().mockResolvedValue(1),
+  mockRedisSet: vi.fn().mockResolvedValue('OK'),
+  cachedPrices: new Map<string, unknown>(),
+}));
+
+vi.mock('fs/promises', () => ({
+  writeFile: mockWriteFile,
+  mkdir: mockMkdir,
+}));
+
+vi.mock('@/lib/prisma', () => {
+  const database = {
+    extractionConfig: {
+      findFirst: mockExtractionConfigFindFirst,
+      async findUnique() { return persistence.config; },
+      async update({ data }: { data: Record<string, unknown> }) { persistence.config = { ...persistence.config, ...data }; return persistence.config; },
+    },
+    apiUsageLog: { create: mockApiUsageLogCreate },
+  };
+  return { prisma: { ...database, $transaction: async (operation: (value: typeof database) => Promise<unknown>) => operation(database) } };
+});
+
+// Model the Redis boundary with an in-memory cache. Failed factories are never
+// cached, allowing the retry tests to distinguish fares from failed searches.
+// The redis client itself is a controllable stub so the admission gate tests
+// can drive INCR/DECR at the boundary instead of standing up a real Redis.
+vi.mock('@/lib/redis', () => ({
+  cached: async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
+    if (cachedPrices.has(key)) return cachedPrices.get(key) as T;
+    const value = await fn();
+    cachedPrices.set(key, value);
+    return value;
+  },
+  redis: {
+    eval: mockRedisEval,
+    incr: mockRedisIncr,
+    decr: mockRedisDecr,
+    expire: mockRedisExpire,
+    set: mockRedisSet,
+  },
+}));
+
+vi.mock('@/lib/scraper/navigate', () => ({
+  navigateGoogleFlights: mockNavigateGoogleFlights,
+  navigateAirlineDirect: mockNavigateAirlineDirect,
+}));
+
+vi.mock('@/lib/scraper/extract-prices', () => ({
+  extractPrices: mockExtractPrices,
+}));
+
+import {
+  runPreview as runAdmittedPreview,
+  parsePreviewConcurrency,
+  validatePreviewPayload,
+  acquirePreviewAdmission,
+  releasePreviewAdmission,
+  buildPreviewDatePairs,
+  buildCacheKey,
+} from './preview-runner';
+import {
+  countPreviewTasks,
+  isPreviewTooFarInFuture,
+  PREVIEW_MAX_FUTURE_DAYS,
+  UNEQUAL_MULTI_DATE_ERROR,
+} from './preview-utils';
+
+// Worker lifecycle is exercised with PostgreSQL and Chromium in coordinator
+// integration tests. These cases exercise the admitted extraction pipeline.
+async function runPreview(...args: Parameters<typeof runAdmittedPreview>) {
+  const lease = { id: 'browser', owner: 'preview-test', generation: 1, topologyVersion: 1 };
+  const job = { id: 'preview-test', kind: 'flight_preview', userId: null, status: 'running' } as TravelJob;
+  const config = await mockExtractionConfigFindFirst() as ExtractionConfig | null;
+  persistence.config = config;
+  return withTravelContext({ job, lease, config, vpn: new TravelVpnSession(lease, 'none') }, () => runAdmittedPreview(...args));
+}
+
+function makePayload(overrides: Partial<PreviewRequestPayload> = {}): PreviewRequestPayload {
+  return {
+    dateFrom: '2026-11-09',
+    dateTo: '2026-11-09',
+    maxPrice: null,
+    maxStops: null,
+    maxDurationHours: null,
+    preferredAirlines: [],
+    timePreference: 'any',
+    cabinClass: 'economy',
+    tripType: 'one_way',
+    currency: 'USD',
+    origins: [{ code: 'JFK', name: 'New York' }],
+    destinations: [{ code: 'LAX', name: 'Los Angeles' }],
+    ...overrides,
+  };
+}
+
+function priceData(airline: string, price: number) {
+  return {
+    travelDate: '2027-04-15',
+    airline,
+    price,
+    currency: 'USD',
+    duration: '5h 30m',
+    stops: 0,
+    bookingUrl: 'https://example.com',
+    flightId: null,
+    flightNumber: null,
+    timestamps: { departure: null, arrival: null },
+  };
+}
+
+beforeEach(async () => {
+  persistence.state!.reset();
+  persistence.config = null;
+  await (await import('@/lib/sidedoor/providers/provider-credentials')).initializeProviderCredentials();
+  cachedPrices.clear();
+  mockExtractionConfigFindFirst.mockReset();
+  mockApiUsageLogCreate.mockClear();
+  mockExtractPrices.mockReset();
+  mockNavigateGoogleFlights.mockReset();
+  mockNavigateAirlineDirect.mockReset();
+  mockWriteFile.mockClear();
+  mockMkdir.mockClear();
+  mockRedisEval.mockReset();
+  mockRedisIncr.mockReset();
+  mockRedisDecr.mockReset();
+  mockRedisExpire.mockClear();
+  mockRedisSet.mockClear();
+  mockRedisExpire.mockResolvedValue(1);
+  mockRedisSet.mockResolvedValue('OK');
+
+  mockExtractionConfigFindFirst.mockResolvedValue({
+    id: 'singleton',
+    provider: 'anthropic',
+    model: 'claude-haiku-4-5-20251001',
+    defaultCurrency: 'USD',
+  });
+  mockNavigateGoogleFlights.mockResolvedValue({
+    html: '<html></html>',
+    url: 'https://google.com/flights',
+    source: 'google_flights',
+    resultsFound: true,
+  });
+  mockExtractPrices.mockResolvedValue({
+    prices: [priceData('AA', 250)],
+    usage: { inputTokens: 100, outputTokens: 50 },
+    failureReason: undefined,
+  });
+});
+
+describe('runPreview API key resolution (#149)', () => {
+  it('threads the DB-stored key (decrypted) into the extractPrices override', async () => {
+    const { prisma } = await import('@/lib/prisma');
+    const { providerVault } = await import('@/lib/sidedoor/providers/provider-credentials');
+    await providerVault(prisma).vault.configure('anthropic', { apiKey: 'stored-preview-key', compatibleApiKey: 'stored-preview-key', baseUrl: process.env.ANTHROPIC_BASE_URL! });
+    mockExtractionConfigFindFirst.mockResolvedValue({
+      id: 'singleton',
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5-20251001',
+      defaultCurrency: 'USD',
+    });
+
+    await runPreview(makePayload(), { concurrency: 1 });
+
+    expect(mockExtractPrices).toHaveBeenCalled();
+    const override = mockExtractPrices.mock.calls[0]![8] as { apiKey?: string };
+    expect(override.apiKey).toBe('stored-preview-key');
+  });
+});
+
+describe('runPreview configuration snapshot', () => {
+  it('uses the admitted provider and currency across many tasks', async () => {
+    const payload = makePayload({
+      origins: [{ code: 'JFK', name: 'A' }, { code: 'EWR', name: 'B' }],
+      destinations: [{ code: 'LAX', name: 'C' }, { code: 'SFO', name: 'D' }],
+      tripType: 'one_way',
+      dateFrom: '2026-11-09',
+      dateTo: '2026-11-13',
+    });
+
+    await runPreview(payload, { concurrency: 4 });
+
+    expect(mockExtractPrices.mock.calls.length).toBeGreaterThan(1);
+    for (const call of mockExtractPrices.mock.calls) {
+      expect(call[8]).toMatchObject({ provider: 'anthropic', model: 'claude-haiku-4-5-20251001' });
+    }
+    for (const call of mockNavigateGoogleFlights.mock.calls) expect(call[0]).toMatchObject({ currency: 'USD' });
+  });
+});
+
+describe('runPreview heartbeat invariant', () => {
+  it('invokes onTaskComplete once per task (success path)', async () => {
+    const payload = makePayload({
+      origins: [{ code: 'JFK', name: 'A' }, { code: 'EWR', name: 'B' }],
+      destinations: [{ code: 'LAX', name: 'C' }],
+      dateFrom: '2026-11-09',
+      dateTo: '2026-11-11',
+      tripType: 'one_way',
+    });
+
+    const onTaskComplete = vi.fn();
+    await runPreview(payload, { onTaskComplete, concurrency: 1 });
+
+    // 2 origins x 1 destination x 3 dates = 6 tasks
+    expect(onTaskComplete).toHaveBeenCalledTimes(6);
+  });
+
+  it('invokes onTaskComplete on failure path too', async () => {
+    // all_filtered_out is non-retryable, so the scrapeRoute throws on
+    // the first attempt without waiting on the random 5-10s backoff
+    // that retryable reasons trigger.
+    mockExtractPrices.mockResolvedValue({
+      prices: [],
+      usage: { inputTokens: 0, outputTokens: 0 },
+      failureReason: 'all_filtered_out',
+    });
+
+    const onTaskComplete = vi.fn();
+    const payload = makePayload();
+    await expect(runPreview(payload, { onTaskComplete })).rejects.toThrow();
+    expect(onTaskComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('swallows errors thrown from onTaskComplete and keeps running', async () => {
+    const payload = makePayload({
+      origins: [{ code: 'JFK', name: 'A' }],
+      destinations: [{ code: 'LAX', name: 'C' }, { code: 'SFO', name: 'D' }],
+    });
+
+    const onTaskComplete = vi.fn().mockRejectedValue(new Error('db down'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await runPreview(payload, { onTaskComplete, concurrency: 1 });
+    expect(result.routes).toHaveLength(2);
+    expect(onTaskComplete).toHaveBeenCalledTimes(2);
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+});
+
+describe('runPreview parallelism gate', () => {
+  /**
+   * Deterministic barrier instrumentation (audit C1). Each navigate
+   * call signals "I have started" via a resolve hook, waits on a
+   * release barrier, then signals finish. The waitForInFlight helper
+   * is event driven instead of setTimeout polled, so tests do not
+   * depend on real wall clock progress and are not flaky on slow CI.
+   */
+  function instrumentedNavigate() {
+    let inFlight = 0;
+    let peak = 0;
+    let autoRelease = false;
+    const releasers: Array<() => void> = [];
+    const startWatchers: Array<{ target: number; resolve: () => void }> = [];
+
+    const notifyStart = () => {
+      for (let i = startWatchers.length - 1; i >= 0; i--) {
+        if (inFlight >= startWatchers[i]!.target) {
+          startWatchers[i]!.resolve();
+          startWatchers.splice(i, 1);
+        }
+      }
+    };
+
+    mockNavigateGoogleFlights.mockImplementation(async () => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      notifyStart();
+      if (!autoRelease) {
+        await new Promise<void>((resolve) => releasers.push(resolve));
+      }
+      inFlight--;
+      return {
+        html: '<html></html>',
+        url: 'https://google.com/flights',
+        source: 'google_flights',
+        resultsFound: true,
+      };
+    });
+
+    const waitForInFlight = (target: number): Promise<void> => {
+      if (inFlight >= target) return Promise.resolve();
+      return new Promise<void>((resolve) => startWatchers.push({ target, resolve }));
+    };
+
+    return {
+      getPeak: () => peak,
+      getInFlight: () => inFlight,
+      getPending: () => releasers.length,
+      releaseAll: () => releasers.splice(0).forEach((r) => r()),
+      releaseOne: () => releasers.shift()?.(),
+      // Releases all currently pending navigates AND switches future
+      // navigate calls to no-await mode. Used to let the worker pool
+      // drain to completion after the test has captured the peak.
+      drain: () => {
+        autoRelease = true;
+        releasers.splice(0).forEach((r) => r());
+      },
+      waitForInFlight,
+    };
+  }
+
+  it('caps in flight scrapeRoute calls at the configured concurrency', async () => {
+    const payload = makePayload({
+      origins: [{ code: 'JFK', name: 'A' }, { code: 'EWR', name: 'B' }, { code: 'LGA', name: 'L' }],
+      destinations: [{ code: 'LAX', name: 'C' }, { code: 'SFO', name: 'D' }],
+      tripType: 'one_way',
+    });
+    // 3 x 2 x 1 = 6 tasks
+
+    const probe = instrumentedNavigate();
+    const promise = runPreview(payload, { concurrency: 3 });
+
+    // Deterministic: wait until 3 workers have entered navigate.
+    await probe.waitForInFlight(3);
+    expect(probe.getInFlight()).toBe(3);
+    // The remaining 3 tasks are queued: no worker has released yet, so
+    // only 3 navigates are pending.
+    expect(probe.getPending()).toBe(3);
+
+    // Drain the queue to completion. Peak must not have exceeded 3.
+    probe.drain();
+    await promise;
+    expect(probe.getPeak()).toBe(3);
+    expect(mockNavigateGoogleFlights).toHaveBeenCalledTimes(6);
+  });
+
+  it('runs serially when concurrency=1 (regression for opt out)', async () => {
+    const payload = makePayload({
+      origins: [{ code: 'JFK', name: 'A' }, { code: 'EWR', name: 'B' }],
+      destinations: [{ code: 'LAX', name: 'C' }],
+    });
+
+    const probe = instrumentedNavigate();
+    const promise = runPreview(payload, { concurrency: 1 });
+
+    // Single worker active at all times.
+    await probe.waitForInFlight(1);
+    expect(probe.getInFlight()).toBe(1);
+    expect(probe.getPending()).toBe(1);
+
+    probe.drain();
+    await promise;
+    expect(probe.getPeak()).toBe(1);
+    expect(mockNavigateGoogleFlights).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('runPreview output ordering', () => {
+  it('preserves input task order even when workers finish out of order', async () => {
+    const payload = makePayload({
+      origins: [{ code: 'JFK', name: 'JFK Name' }, { code: 'EWR', name: 'EWR Name' }, { code: 'LGA', name: 'LGA Name' }],
+      destinations: [{ code: 'LAX', name: 'LAX Name' }],
+      tripType: 'one_way',
+    });
+
+    // Make the EWR call (task index 1) resolve slowest so it would land
+    // out of order in a push based implementation.
+    mockNavigateGoogleFlights.mockImplementation(async ({ origin }: { origin: string }) => {
+      const delay = origin === 'EWR' ? 50 : 5;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      return {
+        html: '<html></html>',
+        url: 'https://google.com/flights',
+        source: 'google_flights',
+        resultsFound: true,
+      };
+    });
+
+    const result = await runPreview(payload, { concurrency: 3 });
+    expect(result.routes.map((r) => r.origin)).toEqual(['JFK', 'EWR', 'LGA']);
+  });
+});
+
+describe('parsePreviewConcurrency (audit D1)', () => {
+  it('defaults to 3 when env is unset', () => {
+    expect(parsePreviewConcurrency(undefined)).toBe(3);
+  });
+
+  it('returns the parsed value within range', () => {
+    expect(parsePreviewConcurrency('1')).toBe(1);
+    expect(parsePreviewConcurrency('5')).toBe(5);
+    expect(parsePreviewConcurrency('10')).toBe(10);
+  });
+
+  it('clamps values above 10 to 10', () => {
+    expect(parsePreviewConcurrency('25')).toBe(10);
+    expect(parsePreviewConcurrency('1000')).toBe(10);
+  });
+
+  it('falls back to 3 on garbage or non positive input', () => {
+    expect(parsePreviewConcurrency('garbage')).toBe(3);
+    expect(parsePreviewConcurrency('0')).toBe(3);
+    expect(parsePreviewConcurrency('-5')).toBe(3);
+    expect(parsePreviewConcurrency('')).toBe(3);
+  });
+});
+
+describe('buildPreviewDatePairs', () => {
+  it('broadcasts a single return date across multiple outbound dates', () => {
+    expect(
+      buildPreviewDatePairs(
+        ['2026-08-01', '2026-08-02'],
+        ['2026-08-10'],
+        '2026-08-01',
+        '2026-08-10',
+        false,
+      ),
+    ).toEqual([
+      { outboundDate: '2026-08-01', returnDate: '2026-08-10' },
+      { outboundDate: '2026-08-02', returnDate: '2026-08-10' },
+    ]);
+  });
+
+  it('broadcasts a single outbound date across multiple return dates', () => {
+    expect(
+      buildPreviewDatePairs(
+        ['2026-08-01'],
+        ['2026-08-10', '2026-08-11'],
+        '2026-08-01',
+        '2026-08-11',
+        false,
+      ),
+    ).toEqual([
+      { outboundDate: '2026-08-01', returnDate: '2026-08-10' },
+      { outboundDate: '2026-08-01', returnDate: '2026-08-11' },
+    ]);
+  });
+
+  it('pairs equal-length multi-date legs by index', () => {
+    expect(
+      buildPreviewDatePairs(
+        ['2026-08-05', '2026-08-06'],
+        ['2026-08-20', '2026-08-21'],
+        '2026-08-05',
+        '2026-08-21',
+        false,
+      ),
+    ).toEqual([
+      { outboundDate: '2026-08-05', returnDate: '2026-08-20' },
+      { outboundDate: '2026-08-06', returnDate: '2026-08-21' },
+    ]);
+  });
+
+  it('rejects unequal multi×multi date lists instead of cartesian explosion', () => {
+    expect(() =>
+      buildPreviewDatePairs(
+        ['2026-08-01', '2026-08-02'],
+        ['2026-08-10', '2026-08-11', '2026-08-12'],
+        '2026-08-01',
+        '2026-08-12',
+        false,
+      ),
+    ).toThrow(UNEQUAL_MULTI_DATE_ERROR);
+  });
+});
+
+describe('validatePreviewPayload mismatched date arrays', () => {
+  it('accepts multiple outbound dates with a single return date', () => {
+    expect(() =>
+      validatePreviewPayload(
+        makePayload({
+          tripType: 'round_trip',
+          dateFrom: '2026-08-01',
+          dateTo: '2026-08-10',
+          outboundDates: ['2026-08-01', '2026-08-02'],
+          returnDates: ['2026-08-10'],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects unequal multi×multi outbound/return lists', () => {
+    expect(() =>
+      validatePreviewPayload(
+        makePayload({
+          tripType: 'round_trip',
+          dateFrom: '2026-08-01',
+          dateTo: '2026-08-12',
+          outboundDates: ['2026-08-01', '2026-08-02'],
+          returnDates: ['2026-08-10', '2026-08-11', '2026-08-12'],
+        }),
+      ),
+    ).toThrow(UNEQUAL_MULTI_DATE_ERROR);
+  });
+});
+
+describe('validatePreviewPayload far-future dates', () => {
+  const dateFromNow = (days: number): string => {
+    const date = new Date();
+    date.setUTCHours(0, 0, 0, 0);
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().split('T')[0]!;
+  };
+
+  it(`rejects previews more than ${PREVIEW_MAX_FUTURE_DAYS} days out`, () => {
+    const outbound = dateFromNow(PREVIEW_MAX_FUTURE_DAYS + 30);
+    const returnDate = dateFromNow(PREVIEW_MAX_FUTURE_DAYS + 39);
+    expect(() =>
+      validatePreviewPayload(
+        makePayload({
+          tripType: 'round_trip',
+          dateFrom: outbound,
+          dateTo: returnDate,
+          outboundDates: [outbound],
+          returnDates: [returnDate],
+        }),
+      ),
+    ).toThrow(/more than 9 months out/);
+  });
+
+  it('accepts dates inside the hard future limit', () => {
+    const outbound = dateFromNow(60);
+    const returnDate = dateFromNow(69);
+    expect(() =>
+      validatePreviewPayload(
+        makePayload({
+          tripType: 'round_trip',
+          dateFrom: outbound,
+          dateTo: returnDate,
+          outboundDates: [outbound],
+          returnDates: [returnDate],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects an unparseable date instead of bypassing the future guard', () => {
+    expect(
+      isPreviewTooFarInFuture({
+        tripType: 'one_way',
+        dateFrom: 'not-a-date',
+        dateTo: 'not-a-date',
+        outboundDates: ['not-a-date'],
+        returnDates: [],
+      }),
+    ).toBe(true);
+  });
+});
+
+describe('countPreviewTasks parity with validatePreviewPayload', () => {
+  it('matches the server task count for a broadcast round-trip', () => {
+    const payload = makePayload({
+      tripType: 'round_trip',
+      dateFrom: '2026-08-01',
+      dateTo: '2026-08-10',
+      outboundDates: ['2026-08-01', '2026-08-02'],
+      returnDates: ['2026-08-10'],
+      origins: [
+        { code: 'LAX', name: 'Los Angeles' },
+        { code: 'SFO', name: 'San Francisco' },
+      ],
+      destinations: [{ code: 'YOW', name: 'Ottawa' }],
+    });
+    const count = countPreviewTasks(payload.origins.length, payload.destinations.length, payload);
+    expect(count).toBe(4);
+    expect(() => validatePreviewPayload(payload)).not.toThrow();
+  });
+});
+
+describe('round-trip pricing', () => {
+  const roundTrip = (overrides: Partial<PreviewRequestPayload> = {}) => makePayload({
+    tripType: 'round_trip', dateFrom: '2027-04-15', dateTo: '2027-04-30',
+    origins: [{ code: 'YUL', name: 'Montreal' }], destinations: [{ code: 'NRT', name: 'Tokyo' }],
+    ...overrides,
+  });
+  const shell = { html: 'Loading results…', url: 'https://google.com/flights', source: 'google_flights', resultsFound: false };
+  const extraction = (prices: ReturnType<typeof priceData>[], failureReason?: string) => ({
+    prices, failureReason, usage: { inputTokens: 100, outputTokens: 50 },
+  });
+  function arrangeEstimate(inbound = { ...priceData('ANA', 1200), travelDate: '2027-04-30' }) {
+    mockNavigateGoogleFlights.mockResolvedValueOnce(shell);
+    mockExtractPrices.mockResolvedValueOnce(extraction([], 'page_not_loaded'))
+      .mockResolvedValueOnce(extraction([priceData('Air Canada', 1791)]))
+      .mockResolvedValueOnce(extraction([inbound]));
+  }
+
+  it.each(['2027-04-29', '2027-04-30', '2027-05-15'])('preserves real round-trip fares returning %s', async (dateTo) => {
+    const fare = priceData('Air Canada', 1809);
+    mockExtractPrices.mockResolvedValue(extraction([fare]));
+    const result = await runPreview(roundTrip({ dateTo }));
+    expect(result.routes[0]?.flights).toEqual([fare]);
+    expect(result.routes[0]?.oneWayEstimate).toBeUndefined();
+    expect(mockNavigateGoogleFlights.mock.calls.map(([params]) => params.tripType)).toEqual(['round_trip']);
+    expect(mockNavigateGoogleFlights.mock.calls[0]?.[0]).toMatchObject({ dateTo: new Date(`${dateTo}T00:00:00Z`) });
+  });
+
+  it('uses the preferred airline for a long-stay round trip', async () => {
+    mockNavigateAirlineDirect.mockResolvedValue({ ...shell, source: 'airline_direct', resultsFound: true });
+    const result = await runPreview(roundTrip({ preferredAirlines: ['Lufthansa'] }));
+    expect(result.routes[0]?.flights).toEqual([priceData('AA', 250)]);
+    expect(mockNavigateAirlineDirect.mock.calls[0]?.[0]).toMatchObject({ tripType: 'round_trip' });
+    expect(mockNavigateGoogleFlights).not.toHaveBeenCalled();
+  });
+
+  it('returns an untrackable two-ticket estimate only after round-trip loading fails', async () => {
+    arrangeEstimate();
+    const result = await runPreview(roundTrip());
+    expect(result.flights).toEqual([]);
+    expect(result.routes[0]).toMatchObject({
+      flights: [], error: expect.stringMatching(/Round-trip fares did not load/),
+      oneWayEstimate: { totalPrice: 2991, currency: 'USD', outbound: priceData('Air Canada', 1791), inbound: { airline: 'ANA', price: 1200, travelDate: '2027-04-30' } },
+    });
+    expect(mockNavigateGoogleFlights.mock.calls.map(([params]) => [params.origin, params.destination, params.tripType])).toEqual([
+      ['YUL', 'NRT', 'round_trip'], ['YUL', 'NRT', 'one_way'], ['NRT', 'YUL', 'one_way'],
+    ]);
+    expect(mockApiUsageLogCreate.mock.calls.map(([args]) => args.data.inputTokens)).toEqual([100, 100, 100]);
+  });
+
+  it('retries real round-trip fares on a new preview instead of caching an estimate', async () => {
+    arrangeEstimate();
+    const first = await runPreview(roundTrip());
+    expect(first.routes[0]?.oneWayEstimate?.totalPrice).toBe(2991);
+    const actual = priceData('Air Canada', 1809);
+    mockExtractPrices.mockResolvedValue(extraction([actual]));
+    const second = await runPreview(roundTrip());
+    expect(second.routes[0]?.flights).toEqual([actual]);
+    expect(second.routes[0]?.oneWayEstimate).toBeUndefined();
+  });
+
+  it('rejects a combined estimate exceeding the total budget', async () => {
+    arrangeEstimate();
+    await expect(runPreview(roundTrip({ maxPrice: 2000 }))).rejects.toThrow(/total budget/);
+  });
+
+  it('never adds different currencies together', async () => {
+    arrangeEstimate({ ...priceData('ANA', 1200), currency: 'JPY', travelDate: '2027-04-30' });
+    await expect(runPreview(roundTrip())).rejects.toThrow(/currency/);
+  });
+
+  it('chooses the cheapest compatible pair and preserves each ticket independently', async () => {
+    mockNavigateGoogleFlights.mockResolvedValueOnce(shell);
+    const outbound = { ...priceData('Air Canada', 700), currency: 'CAD', bookingUrl: 'https://example.com/outbound' };
+    const inbound = { ...priceData('ANA', 900), currency: 'CAD', bookingUrl: 'https://example.com/inbound', travelDate: '2027-04-30' };
+    mockExtractPrices.mockResolvedValueOnce(extraction([], 'page_not_loaded'))
+      .mockResolvedValueOnce(extraction([{ ...outbound, price: 1200 }, outbound, { ...outbound, currency: 'JPY', price: 100 }]))
+      .mockResolvedValueOnce(extraction([{ ...inbound, price: 1000 }, inbound]));
+    const result = await runPreview(roundTrip({ maxPrice: 1600 }));
+    expect(result.routes[0]?.oneWayEstimate).toEqual({ outbound, inbound, currency: 'CAD', totalPrice: 1600 });
+  });
+
+  it('retains all extraction usage and the original failure when the return ticket fails', async () => {
+    mockNavigateGoogleFlights.mockResolvedValueOnce(shell)
+      .mockResolvedValueOnce({ ...shell, html: 'outbound fares', resultsFound: true })
+      .mockResolvedValueOnce(shell);
+    mockExtractPrices.mockResolvedValueOnce(extraction([], 'page_not_loaded'))
+      .mockResolvedValueOnce(extraction([priceData('Air Canada', 1791)]))
+      .mockResolvedValueOnce(extraction([], 'page_not_loaded'));
+    await expect(runPreview(roundTrip())).rejects.toThrow(/Round-trip fares did not load.*YUL→NRT/);
+    expect(mockApiUsageLogCreate.mock.calls.map(([args]) => args.data.inputTokens)).toEqual([100, 100, 100]);
+  });
+
+  it.each(['llm_error', 'page_not_loaded'])('surfaces airline extraction failure %s without synthesizing tickets', async (failureReason) => {
+    vi.useFakeTimers();
+    try {
+      mockNavigateAirlineDirect.mockResolvedValue({ ...shell, source: 'airline_direct' });
+      mockExtractPrices.mockResolvedValue(extraction([], failureReason));
+      const rejected = expect(runPreview(roundTrip({ preferredAirlines: ['Lufthansa'] }))).rejects.toThrow();
+      await vi.runAllTimersAsync();
+      await rejected;
+      expect(mockNavigateGoogleFlights).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still attempts other dates when one itinerary and its estimate fail', async () => {
+    mockNavigateGoogleFlights.mockResolvedValueOnce(shell).mockResolvedValueOnce(shell);
+    mockExtractPrices.mockResolvedValueOnce(extraction([], 'page_not_loaded'))
+      .mockResolvedValueOnce(extraction([], 'page_not_loaded'));
+    const result = await runPreview(roundTrip({ outboundDates: ['2027-04-15', '2027-04-16'], returnDates: ['2027-04-30'] }), { concurrency: 1 });
+    expect(result.routes[0]).toMatchObject({ flights: [], error: expect.stringContaining('YUL→NRT') });
+    expect(result.routes[1]?.flights).toEqual([priceData('AA', 250)]);
+    expect(mockNavigateGoogleFlights.mock.calls[2]?.[0]).toMatchObject({ tripType: 'round_trip', dateFrom: new Date('2027-04-16T00:00:00Z') });
+  });
+
+  it('does not synthesize a return ticket for a failed one-way search', async () => {
+    mockNavigateGoogleFlights.mockResolvedValue(shell);
+    mockExtractPrices.mockResolvedValue(extraction([], 'page_not_loaded'));
+    await expect(runPreview(makePayload())).rejects.toThrow(/Google Flights did not return results/);
+    expect(mockNavigateGoogleFlights.mock.calls.map(([params]) => params.tripType)).toEqual(['one_way']);
+  });
+
+  it('does not replace filter failures with separate tickets', async () => {
+    mockExtractPrices.mockResolvedValue(extraction([], 'all_filtered_out'));
+    await expect(runPreview(roundTrip())).rejects.toThrow(/filters/);
+    expect(mockNavigateGoogleFlights.mock.calls.every(([params]) => params.tripType === 'round_trip')).toBe(true);
+  });
+
+  it('keeps preview caches separate when criteria or strict departure mode change', () => {
+    const base = { maxPrice: null, maxStops: null, maxDurationHours: null, preferredAirlines: [], timePreference: 'any' };
+    const key = (filters: Parameters<typeof buildCacheKey>[7]) => buildCacheKey('YUL', 'NRT', '2027-04-15', '2027-04-30', 'economy', 'round_trip', 'CAD', filters);
+    expect(key(base)).not.toBe(key({ ...base, maxPrice: 2000 }));
+    expect(key(base)).not.toBe(key({ ...base, preferredAirlines: ['Lufthansa'] }));
+    expect(key({ ...base, timePreference: 'morning', strictDepartureTime: false })).not.toBe(key({ ...base, timePreference: 'morning', strictDepartureTime: true }));
+    expect(key({ ...base, timePreference: 'morning', strictDepartureTime: true })).not.toBe(key({ ...base, timePreference: 'afternoon', strictDepartureTime: true }));
+  });
+});
+
+describe('validatePreviewPayload combo cap (issue #89, configurable)', () => {
+  // 5 origins x 6 destinations x 1 date = 30 combos.
+  const wideFlexPayload = makePayload({
+    tripType: 'one_way',
+    dateFrom: '2026-11-09',
+    dateTo: '2026-11-09',
+    origins: [
+      { code: 'JFK', name: 'A' }, { code: 'EWR', name: 'B' }, { code: 'BOS', name: 'C' },
+      { code: 'PHL', name: 'D' }, { code: 'BWI', name: 'E' },
+    ],
+    destinations: [
+      { code: 'LAX', name: 'F' }, { code: 'SFO', name: 'G' }, { code: 'SAN', name: 'H' },
+      { code: 'SEA', name: 'I' }, { code: 'PDX', name: 'J' }, { code: 'LAS', name: 'K' },
+    ],
+  });
+
+  it('rejects a 30-combo search under the default cap of 24', () => {
+    expect(() => validatePreviewPayload(wideFlexPayload)).toThrow(
+      'Too many date/route combinations (30). Cap is 24 (combos x dates).',
+    );
+  });
+
+  it('accepts the same 30-combo search when the admin raises the cap to 30', () => {
+    expect(() => validatePreviewPayload(wideFlexPayload, 30)).not.toThrow();
+  });
+
+  it('reports the configured cap in the error message, not a hardcoded 24', () => {
+    expect(() => validatePreviewPayload(wideFlexPayload, 12)).toThrow(/Cap is 12/);
+  });
+});
+
+describe('validatePreviewPayload maxPrice', () => {
+  it('rejects NaN, negative, and non-finite maxPrice', () => {
+    for (const bad of [NaN, -1, Infinity, Number.MAX_SAFE_INTEGER + 2]) {
+      expect(() => validatePreviewPayload(makePayload({ maxPrice: bad }))).toThrow(/maxPrice/);
+    }
+  });
+
+  it('accepts null and high denomination currency values', () => {
+    expect(() => validatePreviewPayload(makePayload({ maxPrice: null }))).not.toThrow();
+    expect(() => validatePreviewPayload(makePayload({ maxPrice: 2_550_760 }))).not.toThrow();
+  });
+});
+
+describe('preview admission gate (audit M5 TOCTOU, finding F)', () => {
+  /**
+   * Backs the gate with a per-key integer counter that mirrors how the atomic
+   * Lua script and the release path mutate Redis. acquire runs through
+   * redis.eval (the whole admission decision is one server side script);
+   * release runs through redis.decr / redis.set. The script is evaluated
+   * atomically by real Redis, so a concurrent burst is serialized: at most
+   * `cap` invocations see a post-increment value at or below the cap, and
+   * every overshoot rolls its own increment back, leaving the counter exact.
+   *
+   * Modeling acquire as a single eval (not separate INCR/EXPIRE/DECR calls) is
+   * what proves finding F: there is no interleaving window where one command
+   * can fail and leak a slot, because Redis runs the script start to finish.
+   */
+  function backCounterWithRedis(initial = 0) {
+    const store = new Map<string, number>();
+    let ttlSets = 0;
+    mockRedisEval.mockImplementation(
+      async (_script: string, _numKeys: number, key: string, capArg: string, _ttl: string) => {
+        const cap = Number(capArg);
+        const current = (store.get(key) ?? initial) + 1;
+        store.set(key, current);
+        if (current === 1) ttlSets++;
+        if (current > cap) {
+          store.set(key, current - 1); // overshoot rollback DECR
+          return 0;
+        }
+        return 1;
+      },
+    );
+    mockRedisDecr.mockImplementation(async (key: string) => {
+      const next = (store.get(key) ?? 0) - 1;
+      store.set(key, next);
+      return next;
+    });
+    mockRedisSet.mockImplementation(async (key: string) => {
+      store.set(key, 0);
+      return 'OK';
+    });
+    return {
+      get: (key = 'preview-admit:203.0.113.5') => store.get(key) ?? 0,
+      ttlSets: () => ttlSets,
+    };
+  }
+
+  it('admits at most `cap` requests from a concurrent burst for one IP', async () => {
+    const counter = backCounterWithRedis();
+    const cap = 3;
+
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => acquirePreviewAdmission('203.0.113.5', cap)),
+    );
+
+    const admitted = results.filter((r) => r === 'admitted');
+    const rejected = results.filter((r) => r === 'rejected');
+    expect(admitted).toHaveLength(cap);
+    expect(rejected).toHaveLength(10 - cap);
+    // Overshooting requests roll their own increment back inside the script,
+    // so the counter settles exactly at the cap, not at 10.
+    expect(counter.get()).toBe(cap);
+  });
+
+  it('passes the cap and TTL into the atomic script', async () => {
+    backCounterWithRedis();
+
+    await acquirePreviewAdmission('198.51.100.1', 5);
+
+    const call = mockRedisEval.mock.calls[0]!;
+    // eval(script, numKeys, key, cap, ttlSeconds)
+    expect(call[1]).toBe(1);
+    expect(call[2]).toBe('preview-admit:198.51.100.1');
+    expect(call[3]).toBe('5');
+    expect(Number(call[4])).toBeGreaterThan(0);
+  });
+
+  it('frees a slot on release so a later request is admitted again', async () => {
+    const counter = backCounterWithRedis();
+    const cap = 1;
+
+    expect(await acquirePreviewAdmission('203.0.113.9', cap)).toBe('admitted');
+    expect(await acquirePreviewAdmission('203.0.113.9', cap)).toBe('rejected');
+
+    await releasePreviewAdmission('203.0.113.9');
+    expect(counter.get('preview-admit:203.0.113.9')).toBe(0);
+
+    expect(await acquirePreviewAdmission('203.0.113.9', cap)).toBe('admitted');
+  });
+
+  it('floors the counter at zero on an over-release', async () => {
+    const counter = backCounterWithRedis(0);
+
+    await releasePreviewAdmission('203.0.113.11');
+
+    // DECR from 0 returns -1; the gate resets it to 0 so a stray release
+    // cannot hand the client extra capacity.
+    expect(mockRedisSet).toHaveBeenCalled();
+    expect(counter.get('preview-admit:203.0.113.11')).toBe(0);
+  });
+
+  it('fails CLOSED (rejected, not admitted) when the admission script throws', async () => {
+    // Finding F: a Redis error must deny admission, never silently admit or
+    // fall back to a non atomic DB count that reopens the TOCTOU race.
+    mockRedisEval.mockRejectedValue(new Error('redis down'));
+
+    const result = await acquirePreviewAdmission('203.0.113.13', 3);
+
+    expect(result).toBe('rejected');
+  });
+
+  it('does not leak a slot when the script errors after reserving (single atomic call)', async () => {
+    // The whole admission decision is one eval, so there is no partial state to
+    // leak: if eval throws, no slot was reserved and the caller owes no release.
+    // Assert the gate never issued a stray INCR/DECR outside the script.
+    mockRedisEval.mockRejectedValue(new Error('redis down'));
+
+    await acquirePreviewAdmission('203.0.113.14', 3);
+
+    expect(mockRedisIncr).not.toHaveBeenCalled();
+    expect(mockRedisDecr).not.toHaveBeenCalled();
+  });
+});
+
+describe('runPreview debug filename uniqueness (audit A4)', () => {
+  it('writes per task debug paths that encode taskIndex and dateFromStr', async () => {
+    // Force the failure branch so the debug write path runs.
+    // all_filtered_out is non retryable, so we settle on attempt 1
+    // and avoid the 5-10s retry backoff.
+    mockExtractPrices.mockResolvedValue({
+      prices: [],
+      usage: { inputTokens: 0, outputTokens: 0 },
+      failureReason: 'all_filtered_out',
+    });
+
+    const payload = makePayload({
+      origins: [{ code: 'JFK', name: 'A' }],
+      destinations: [{ code: 'LAX', name: 'B' }],
+      tripType: 'one_way',
+      dateFrom: '2026-11-09',
+      dateTo: '2026-11-10',
+    });
+
+    await expect(runPreview(payload, { concurrency: 2 })).rejects.toThrow();
+
+    const paths = mockWriteFile.mock.calls.map((call) => call[0] as string);
+    expect(paths.length).toBeGreaterThanOrEqual(2);
+    // Every path includes the taskN tag so two workers cannot collide.
+    expect(paths.every((p) => /\/preview-task\d+-/.test(p))).toBe(true);
+    // Each task's date appears in its own path.
+    expect(paths.some((p) => p.includes('-2026-11-09-'))).toBe(true);
+    expect(paths.some((p) => p.includes('-2026-11-10-'))).toBe(true);
+    // Unique paths overall, regardless of timestamp collision.
+    expect(new Set(paths).size).toBe(paths.length);
+  });
+});

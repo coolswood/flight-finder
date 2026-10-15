@@ -1,0 +1,52 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type { createAccessFixture } from '@/test/access-fixture';
+const boundary = vi.hoisted(() => ({ fixture: null as ReturnType<typeof createAccessFixture> | null, token: '', owner: '', multiUser: true }));
+vi.mock('next/headers', () => ({ cookies: async () => ({ get: () => boundary.token ? { value: boundary.token } : undefined }) }));
+vi.mock('@/lib/prisma', () => ({ prisma: {
+  extractionConfig: { findUnique: async () => ({ multiUserMode: boundary.multiUser }) },
+  user: { findMany: async ({ where }: { where: { id: { in: string[] } } }) => {
+    const state = await boundary.fixture!.access.store.read();
+    return state.principals.filter(principal => where.id.in.includes(principal.id)).map(principal => ({ id: principal.id, username: principal.name, displayName: null, avatar: 'globe', isAdmin: principal.role === 'owner' }));
+  } },
+} }));
+vi.mock('@/lib/sidedoor/access/service', async () => {
+  const { createAccessFixture } = await import('@/test/access-fixture');
+  const fixture = createAccessFixture(); boundary.fixture = fixture;
+  return { sharedAccess: fixture.access, sharedProfiles: fixture.profiles, SHARED_SESSION_COOKIE: 'ft-session' };
+});
+import { GET } from './route';
+beforeEach(async () => {
+  vi.stubEnv('SELF_HOSTED', 'true'); boundary.multiUser = true; boundary.token = '';
+  boundary.fixture!.reset();
+  boundary.owner = await boundary.fixture!.issue('owner', true);
+  await boundary.fixture!.issue('member');
+  await boundary.fixture!.access.store.transact(state => { state.principals[0]!.passwordHash = 'private-hash'; });
+  await boundary.fixture!.access.configureHousehold(boundary.owner, 'household password for testing');
+  boundary.token = await boundary.fixture!.access.enterHousehold('household password for testing');
+});
+afterEach(() => vi.unstubAllEnvs());
+it('preserves profile names and avatars after password admission without exposing hashes', async () => {
+  const result = await GET();
+  expect(result.status).toBe(200);
+  const payload = await result.json();
+  expect(payload.data.profiles).toEqual(expect.arrayContaining([
+    expect.objectContaining({ username: 'owner', avatar: 'globe' }),
+    expect.objectContaining({ username: 'member' }),
+  ]));
+  expect(JSON.stringify(payload)).not.toMatch(/private-hash|passwordHash/);
+});
+it('requires household admission before showing profile names', async () => {
+  boundary.token = '';
+  expect((await GET()).status).toBe(401);
+  boundary.token = await boundary.fixture!.access.enterHousehold('household password for testing');
+  expect((await GET()).status).toBe(200);
+});
+it('keeps profile names private when stored household state has no password', async () => {
+  boundary.token = '';
+  await boundary.fixture!.access.store.transact(state => { state.householdPasswordHash = null; });
+  expect((await GET()).status).toBe(401);
+});
+it('shows the household picker even when the separate multiuser feature is disabled', async () => {
+  boundary.multiUser = false;
+  expect((await GET()).status).toBe(200);
+});

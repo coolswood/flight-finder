@@ -1,0 +1,40 @@
+{
+  "name": "Flight Finder",
+  "short_name": "Flight Finder",
+  "description": "Self-host flight, hotel and rental car price tracking. Search each independently.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#faf6ed",
+  "theme_color": "#1a4a52",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192-maskable.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

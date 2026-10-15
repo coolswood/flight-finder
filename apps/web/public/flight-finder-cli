@@ -1,0 +1,649 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Flight Finder updater protocol: 1
+
+# Detect deprecated `fairtrail` invocation and print a one line notice.
+# Set FLIGHT_FINDER_SILENCE_RENAME=1 to suppress. Sunset target: v1.0.
+_FF_INVOKED_AS="$(basename "$0")"
+if [ "$_FF_INVOKED_AS" = "fairtrail" ] && [ -z "${FLIGHT_FINDER_SILENCE_RENAME:-}" ]; then
+  printf >&2 '\033[33mNote:\033[0m the `fairtrail` command has been renamed to `flight-finder` (or `flightfinder`). The old name still works but will be removed in v1.0. Set FLIGHT_FINDER_SILENCE_RENAME=1 to hide this notice.\n'
+fi
+
+# Flight Finder CLI — wraps Docker so you never have to think about it.
+# Installed by: curl -fsSL https://flight-finder.org/install.sh | bash
+#
+# Usage:
+#   flight-finder          Start Flight Finder (Ctrl+C to stop)
+#   flight-finder start    Start in background
+#   flight-finder stop     Stop Flight Finder
+#   flight-finder logs     View live logs
+#   flight-finder status   Check if running
+#   flight-finder update   Pull latest version and restart
+#   flight-finder search   Search and track a flight
+#
+# Aliases: flightfinder is a symlink. fairtrail kept working as a
+# deprecated alias through v1.0 for existing installs.
+
+BOLD='\033[1m'
+DIM='\033[2m'
+CYAN='\033[0;36m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+RESET='\033[0m'
+
+FLIGHT_FINDER_DIR="${FLIGHT_FINDER_DIR:-$HOME/.flight-finder}"
+# Read the non-secret published port as data. Never source the config file.
+_SAVED_PORT=""
+if [ -f "$FLIGHT_FINDER_DIR/.env" ]; then
+  _SAVED_PORT=$(sed -n 's/^HOST_PORT=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$FLIGHT_FINDER_DIR/.env" | tail -n 1)
+fi
+PORT="${HOST_PORT:-${PORT:-${_SAVED_PORT:-3003}}}"
+BASE_URL="${FLIGHT_FINDER_URL:-https://flight-finder.org}"
+
+# A private instance can require Sidedoor authentication for every request,
+# including requests from localhost. Create a scoped device credential with
+# `flight-finder access device <principalId> [name]`, export its token as
+# FLIGHT_FINDER_TOKEN, and every API call below carries it. Public instances do
+# not require the token.
+ff_curl() {
+  if [ -n "${FLIGHT_FINDER_TOKEN:-}" ]; then
+    curl -H "Authorization: Bearer ${FLIGHT_FINDER_TOKEN}" "$@"
+  else
+    curl "$@"
+  fi
+}
+
+# Compose-flavor flag helpers (issue #72). Lives next to this script so
+# `command -v flight-finder` and dev-mode (bin/flight-finder → apps/web/public/) both
+# resolve it via dirname "$0". Required, not optional — a missing helper on
+# podman would silently break `flight-finder --headless` again.
+_FLAGS_LIB="$(dirname "$0")/flight-finder-cli-flags.sh"
+if [ ! -f "$_FLAGS_LIB" ]; then
+  printf "\033[0;31m\033[1m✗\033[0m Missing %s — re-run installer:\n  curl -fsSL %s/install.sh | bash\n" \
+    "$_FLAGS_LIB" "${FLIGHT_FINDER_URL:-https://flight-finder.org}" >&2
+  exit 1
+fi
+# shellcheck source=flight-finder-cli-flags.sh
+. "$_FLAGS_LIB"
+
+if [ ! -f "$FLIGHT_FINDER_DIR/docker-compose.yml" ]; then
+  printf "${RED}${BOLD}✗${RESET} Flight Finder not found. Run the installer first:\n"
+  printf "  curl -fsSL https://flight-finder.org/install.sh | bash\n"
+  exit 1
+fi
+
+cd "$FLIGHT_FINDER_DIR"
+
+# Detect container runtime (prefer docker, fall back to podman)
+if command -v docker &>/dev/null; then
+  CONTAINER_CMD=docker
+elif command -v podman &>/dev/null; then
+  CONTAINER_CMD=podman
+else
+  printf "${RED}${BOLD}✗${RESET} Docker or Podman is required.\n"
+  exit 1
+fi
+
+# Resolve override files
+COMPOSE_FILES="-f docker-compose.yml"
+[ -f "docker-compose.override.yml" ] && COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.override.yml"
+# Auto-include VPN sidecar only if EXPRESSVPN_CODE is set to a non-empty
+# value at the start of a line (commented-out or unset entries don't count).
+# Previous form `grep -q "EXPRESSVPN_CODE"` matched `# EXPRESSVPN_CODE=` too,
+# silently enabling the VPN sidecar from a disabled-by-comment placeholder.
+if [ -f "docker-compose.vpn.yml" ] \
+  && grep -Eq '^[[:space:]]*EXPRESSVPN_CODE=.+' .env 2>/dev/null; then
+  COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.vpn.yml"
+fi
+
+# Detect compose command based on detected container runtime
+if [ "$CONTAINER_CMD" = "podman" ]; then
+  # `podman compose` is a thin wrapper that shells out to an external provider
+  # (docker-compose or the standalone podman-compose), it is not a native
+  # engine. When the active provider is podman-compose (Fedora's default) it
+  # rejects Docker's -it/-i exec flags, so a successful `podman compose version`
+  # is NOT proof that -it is safe (issue #96). The provider name surfaces in the
+  # version output: both the ">>>> Executing external compose provider" banner
+  # on stderr and the "podman-compose version N" line on stdout. Capture both
+  # (2>&1 into a var so nothing leaks to the terminal) and, when podman-compose
+  # is the provider, drive it directly: correct -T/empty flags via the helper
+  # and no provider banner on every command.
+  if _pc_probe=$(podman compose version 2>&1); then
+    if printf '%s\n' "$_pc_probe" | grep -q 'podman-compose' \
+        && command -v podman-compose &>/dev/null; then
+      _DC="podman-compose"
+    else
+      _DC="podman compose"
+    fi
+  elif command -v podman-compose &>/dev/null; then
+    _DC="podman-compose"
+  else
+    printf "${RED}${BOLD}✗${RESET} podman compose is required. Install: https://github.com/containers/podman-compose\n"
+    exit 1
+  fi
+elif docker compose version &>/dev/null 2>&1; then
+  _DC="docker compose"
+elif command -v docker-compose &>/dev/null; then
+  _DC="docker-compose"
+else
+  printf "${RED}${BOLD}✗${RESET} Neither 'docker compose' (v2) nor 'docker-compose' (v1) found.\n"
+  exit 1
+fi
+
+dc() {
+  $_DC $COMPOSE_FILES "$@"
+}
+
+format_time() {
+  local iso="$1"
+  if [ -z "$iso" ] || [ "$iso" = "null" ]; then
+    echo "unknown"
+    return
+  fi
+  if date -j -f "%Y-%m-%dT%H:%M:%S" "${iso%%.*}" "+%H:%M" 2>/dev/null; then
+    return
+  fi
+  date -d "$iso" "+%H:%M" 2>/dev/null || echo "$iso"
+}
+
+fetch_health() {
+  ff_curl -sf "http://localhost:${PORT}/api/health" 2>/dev/null
+}
+
+show_tracking_info() {
+  local health
+  health=$(fetch_health)
+  if [ -z "$health" ]; then return; fi
+
+  local queries next_scrape interval
+  queries=$(echo "$health" | grep -o '"activeQueries":[0-9]*' | cut -d: -f2)
+  next_scrape=$(echo "$health" | grep -o '"nextScrape":"[^"]*"' | cut -d'"' -f4)
+  interval=$(echo "$health" | grep -o '"intervalHours":[0-9]*' | cut -d: -f2)
+
+  if [ -n "$queries" ] && [ "$queries" != "0" ]; then
+    local next_str
+    next_str=$(format_time "$next_scrape")
+    printf "  ${BOLD}%s${RESET} active queries — next scrape at ${BOLD}%s${RESET} (every %sh)\n" "$queries" "$next_str" "${interval:-3}"
+  fi
+}
+
+prepare_access() {
+  dc stop web
+  dc up -d --no-recreate db redis
+  dc run --rm --no-deps -e SIDEDOOR_PREPARE_ONLY=true web
+  local access_state
+  access_state=$(dc run --rm --no-deps --entrypoint node web /app/packages/cli/dist/index.js access list)
+  if ! printf '%s\n' "$access_state" | grep -q '"role": "owner"'; then
+    if [ -t 0 ] || (tty -s </dev/tty 2>/dev/null); then
+      printf 'Create the first Admin profile and shared password before starting Flight Finder.\n'
+      cmd_access access setup </dev/tty
+    else
+      printf 'Run flight-finder access setup in a terminal before starting the web app.\n' >&2
+      return 1
+    fi
+  fi
+}
+
+cmd_start_foreground() {
+  if [ "$CONTAINER_CMD" = "docker" ] && ! docker info &>/dev/null 2>&1; then
+    printf "${RED}${BOLD}✗${RESET} Docker is not running. Start Docker Desktop and try again.\n"
+    exit 1
+  fi
+
+
+  echo ""
+  printf "${BOLD}  Flight Finder${RESET}\n"
+  printf "  ${DIM}The price trail airlines don't show you${RESET}\n"
+  echo ""
+
+  prepare_access
+  dc up -d 2>&1 | while IFS= read -r line; do
+    printf "  ${DIM}%s${RESET}\n" "$line"
+  done
+
+  printf "${CYAN}${BOLD}▸${RESET} Starting...\n"
+  RETRIES=60
+  until ff_curl -sf "http://localhost:${PORT}/api/health" >/dev/null 2>&1; do
+    RETRIES=$((RETRIES - 1))
+    if [ "$RETRIES" -le 0 ]; then
+      printf "${YELLOW}${BOLD}!${RESET} Took too long — check: flight-finder logs\n"
+      break
+    fi
+    sleep 1
+  done
+
+  if [ "$RETRIES" -gt 0 ]; then
+    printf "${GREEN}${BOLD}✓${RESET} Running at ${BOLD}http://localhost:${PORT}${RESET}\n"
+    # Open browser
+    if [ "$(uname)" = "Darwin" ] && command -v open &>/dev/null; then
+      open "http://localhost:${PORT}"
+    elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
+      xdg-open "http://localhost:${PORT}" >/dev/null 2>&1 &
+    fi
+  fi
+
+  printf "  ${DIM}Press Ctrl+C to stop${RESET}\n"
+  echo ""
+
+  trap 'cmd_stop; exit 0' INT TERM
+  dc logs -f web 2>/dev/null || true
+}
+
+cmd_start_background() {
+  if [ "$CONTAINER_CMD" = "docker" ] && ! docker info &>/dev/null 2>&1; then
+    printf "${RED}${BOLD}✗${RESET} Docker is not running. Start Docker Desktop and try again.\n"
+    exit 1
+  fi
+
+
+  prepare_access
+  dc up -d 2>&1 | while IFS= read -r line; do
+    printf "  ${DIM}%s${RESET}\n" "$line"
+  done
+
+  printf "${GREEN}${BOLD}✓${RESET} Flight Finder running at ${BOLD}http://localhost:${PORT}${RESET}\n"
+  printf "  ${DIM}Stop with: flight-finder stop${RESET}\n"
+
+  # Open browser
+  if [ "$(uname)" = "Darwin" ] && command -v open &>/dev/null; then
+    open "http://localhost:${PORT}"
+  elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
+    xdg-open "http://localhost:${PORT}" >/dev/null 2>&1 &
+  fi
+}
+
+cmd_stop() {
+  echo ""
+  local health
+  health=$(fetch_health)
+  if [ -n "$health" ]; then
+    local queries next_scrape interval
+    queries=$(echo "$health" | grep -o '"activeQueries":[0-9]*' | cut -d: -f2)
+    next_scrape=$(echo "$health" | grep -o '"nextScrape":"[^"]*"' | cut -d'"' -f4)
+    interval=$(echo "$health" | grep -o '"intervalHours":[0-9]*' | cut -d: -f2)
+
+    if [ -n "$queries" ] && [ "$queries" != "0" ]; then
+      local next_str
+      next_str=$(format_time "$next_scrape")
+      printf "  ${YELLOW}${BOLD}%s${RESET}${YELLOW} active queries tracking prices (next scrape at ${BOLD}%s${RESET}${YELLOW}, every %sh)${RESET}\n" "$queries" "$next_str" "${interval:-3}"
+    fi
+  fi
+
+  read -rp "  Stop Flight Finder? [y/N] " confirm
+  if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    printf "  ${DIM}Cancelled${RESET}\n"
+    return
+  fi
+
+  printf "${CYAN}${BOLD}▸${RESET} Stopping Flight Finder...\n"
+  dc stop 2>/dev/null
+  printf "${GREEN}${BOLD}✓${RESET} Stopped\n"
+  printf "  ${YELLOW}Price tracking is paused — no scrapes will run until you start again.${RESET}\n"
+  printf "  ${DIM}Your data and queries are saved. Run 'flightfinder' to resume.${RESET}\n"
+}
+
+cmd_logs() {
+  dc logs -f web
+}
+
+cmd_status() {
+  local health
+  health=$(fetch_health)
+  if [ -n "$health" ]; then
+    printf "${GREEN}${BOLD}✓${RESET} Flight Finder is running at ${BOLD}http://localhost:${PORT}${RESET}\n"
+    show_tracking_info
+  else
+    printf "${DIM}Flight Finder is not running. Start with: flightfinder${RESET}\n"
+  fi
+}
+
+cmd_update() {
+  command -v python3 >/dev/null || { printf >&2 'Update requires Python 3. Install it and retry.\n'; return 1; }
+  if [ -n "${FLIGHT_FINDER_UPDATE_STAGE:-}" ]; then
+    [ "$(dirname "$0")" = "$FLIGHT_FINDER_UPDATE_STAGE" ] || { printf >&2 'Invalid updater stage.\n'; return 1; }
+    exec python3 "$FLIGHT_FINDER_UPDATE_STAGE/update.py" "$FLIGHT_FINDER_DIR" "${FLIGHT_FINDER_UPDATE_TARGET:?}" "$FLIGHT_FINDER_UPDATE_STAGE" $_DC $COMPOSE_FILES
+  fi
+  local target asset
+  target=$(command -v flight-finder 2>/dev/null || command -v fairtrail 2>/dev/null || printf '%s' "$0")
+  target=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$target")
+  stage=$(mktemp -d "$(dirname "$target")/.flight-finder-update.XXXXXX")
+  chmod 700 "$stage"
+  trap 'rm -f "$stage/flight-finder-cli" "$stage/flight-finder-cli-flags.sh" "$stage/network.sh" "$stage/update.py"; rmdir "$stage"' EXIT
+  for asset in flight-finder-cli flight-finder-cli-flags.sh install/network.sh install/update.py; do
+    if ! curl --max-time 60 -fsSL "$BASE_URL/$asset" -o "$stage/${asset##*/}"; then
+      printf >&2 'Updater download failed. Services and configuration were not changed.\n'
+      return 1
+    fi
+    [ -s "$stage/${asset##*/}" ] || { printf >&2 'Updater asset is empty. Services were not changed.\n'; return 1; }
+  done
+  grep -qx '# Flight Finder updater protocol: 1' "$stage/flight-finder-cli" || { printf >&2 'Unsupported updater protocol.\n'; return 1; }
+  bash -n "$stage/flight-finder-cli"
+  bash -n "$stage/flight-finder-cli-flags.sh"
+  bash -n "$stage/network.sh"
+  bash -c 'source "$1"; declare -F _compose_exec_flags >/dev/null' update "$stage/flight-finder-cli-flags.sh"
+  bash -c 'source "$1"; declare -F derive_install_origins >/dev/null' update "$stage/network.sh"
+  python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$stage/update.py"
+  export FLIGHT_FINDER_UPDATE_STAGE="$stage" FLIGHT_FINDER_UPDATE_TARGET="$target"
+  exec bash "$stage/flight-finder-cli" update
+}
+
+cmd_search() {
+  local input="$*"
+  if [ -z "$input" ]; then
+    printf "${RED}${BOLD}✗${RESET} Usage: flight-finder search \"NYC to Tokyo next month\"\n"
+    exit 1
+  fi
+
+  local health
+  health=$(fetch_health)
+  if [ -z "$health" ]; then
+    printf "${RED}${BOLD}✗${RESET} Flight Finder is not running. Start with: flightfinder\n"
+    exit 1
+  fi
+
+  printf "${CYAN}${BOLD}▸${RESET} Parsing: ${BOLD}%s${RESET}\n" "$input"
+
+  # Step 1: Parse natural language query
+  local parse_res
+  parse_res=$(ff_curl -sf "http://localhost:${PORT}/api/parse" \
+    -H 'Content-Type: application/json' \
+    -d "{\"query\": $(printf '%s' "$input" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" 2>/dev/null)
+
+  if [ -z "$parse_res" ]; then
+    printf "${RED}${BOLD}✗${RESET} Failed to reach Flight Finder API\n"
+    exit 1
+  fi
+
+  local ok
+  ok=$(echo "$parse_res" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ok',''))" 2>/dev/null)
+  if [ "$ok" != "True" ]; then
+    local err
+    err=$(echo "$parse_res" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error','Unknown error'))" 2>/dev/null)
+    printf "${RED}${BOLD}✗${RESET} %s\n" "$err"
+    exit 1
+  fi
+
+  # Extract parsed fields
+  local parsed_json
+  parsed_json=$(echo "$parse_res" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+p = d['data']['parsed']
+conf = d['data']['confidence']
+print(json.dumps({'parsed': p, 'confidence': conf}))
+" 2>/dev/null)
+
+  local confidence
+  confidence=$(echo "$parsed_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['confidence'])" 2>/dev/null)
+
+  if [ "$confidence" != "high" ]; then
+    printf "${YELLOW}${BOLD}!${RESET} Ambiguous query. Try being more specific (e.g. include airport codes and dates).\n"
+    exit 1
+  fi
+
+  # Show what was parsed
+  local origins destinations date_from date_to
+  origins=$(echo "$parsed_json" | python3 -c "import json,sys; p=json.load(sys.stdin)['parsed']; print(', '.join(a['code'] for a in p.get('origins',[])))" 2>/dev/null)
+  destinations=$(echo "$parsed_json" | python3 -c "import json,sys; p=json.load(sys.stdin)['parsed']; print(', '.join(a['code'] for a in p.get('destinations',[])))" 2>/dev/null)
+  date_from=$(echo "$parsed_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['parsed']['dateFrom'])" 2>/dev/null)
+  date_to=$(echo "$parsed_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['parsed']['dateTo'])" 2>/dev/null)
+
+  printf "  ${BOLD}%s → %s${RESET}  ${DIM}%s to %s${RESET}\n" "$origins" "$destinations" "$date_from" "$date_to"
+  printf "${CYAN}${BOLD}▸${RESET} Searching flights...\n"
+
+  # Step 2: Preview flights
+  local preview_body
+  preview_body=$(echo "$parsed_json" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['parsed']))" 2>/dev/null)
+
+  local preview_res
+  preview_res=$(ff_curl -sf "http://localhost:${PORT}/api/preview" \
+    -H 'Content-Type: application/json' \
+    -d "$preview_body" 2>/dev/null)
+
+  if [ -z "$preview_res" ]; then
+    printf "${RED}${BOLD}✗${RESET} Flight search failed\n"
+    exit 1
+  fi
+
+  # Step 3: Create tracker with all flights
+  local create_body
+  create_body=$(python3 -c "
+import json, sys
+parsed = json.loads('''$preview_body''')
+preview = json.loads(sys.stdin.read())
+routes = preview.get('data', {}).get('routes', [])
+if not routes and preview.get('data', {}).get('flights'):
+    routes = [{'origin': parsed['origin'], 'originName': parsed['originName'],
+               'destination': parsed['destination'], 'destinationName': parsed['destinationName'],
+               'flights': preview['data']['flights']}]
+body = {
+    'rawInput': '''$input''',
+    'dateFrom': parsed['dateFrom'],
+    'dateTo': parsed['dateTo'],
+    'flexibility': parsed.get('flexibility', 0),
+    'maxPrice': parsed.get('maxPrice'),
+    'maxStops': parsed.get('maxStops'),
+    'preferredAirlines': parsed.get('preferredAirlines', []),
+    'timePreference': parsed.get('timePreference', 'any'),
+    'currency': parsed.get('currency', 'USD'),
+    'cabinClass': parsed.get('cabinClass', 'economy'),
+    'tripType': parsed.get('tripType', 'round_trip'),
+    'routes': [{'origin': r['origin'], 'originName': r.get('originName',''),
+                'destination': r['destination'], 'destinationName': r.get('destinationName',''),
+                'date': r.get('date'), 'returnDate': r.get('returnDate'),
+                'selectedFlights': r.get('flights',[])} for r in routes]
+}
+print(json.dumps(body))
+" <<< "$preview_res" 2>/dev/null)
+
+  local create_res
+  create_res=$(ff_curl -sf "http://localhost:${PORT}/api/queries" \
+    -H 'Content-Type: application/json' \
+    -d "$create_body" 2>/dev/null)
+
+  if [ -z "$create_res" ]; then
+    printf "${RED}${BOLD}✗${RESET} Failed to create tracker\n"
+    exit 1
+  fi
+
+  local create_ok
+  create_ok=$(echo "$create_res" | python3 -c "import json,sys; print(json.load(sys.stdin).get('ok',''))" 2>/dev/null)
+
+  if [ "$create_ok" != "True" ]; then
+    local err
+    err=$(echo "$create_res" | python3 -c "import json,sys; print(json.load(sys.stdin).get('error','Unknown error'))" 2>/dev/null)
+    printf "${RED}${BOLD}✗${RESET} %s\n" "$err"
+    exit 1
+  fi
+
+  # Show results
+  local query_id
+  query_id=$(echo "$create_res" | python3 -c "import json,sys; qs=json.load(sys.stdin)['data']['queries']; print(qs[0]['id'] if qs else '')" 2>/dev/null)
+  local num_queries
+  num_queries=$(echo "$create_res" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['data']['queries']))" 2>/dev/null)
+
+  echo ""
+  printf "${GREEN}${BOLD}✓${RESET} Tracking ${BOLD}%s${RESET} route(s) — prices checked every 3h\n" "$num_queries"
+  printf "  ${BOLD}http://localhost:%s/q/%s${RESET}\n" "$PORT" "$query_id"
+
+  if [ "$(uname)" = "Darwin" ] && command -v open &>/dev/null; then
+    open "http://localhost:${PORT}/q/${query_id}"
+  elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open &>/dev/null; then
+    xdg-open "http://localhost:${PORT}/q/${query_id}" >/dev/null 2>&1 &
+  fi
+}
+
+cmd_uninstall() {
+  echo ""
+  printf "${YELLOW}${BOLD}!${RESET} This will stop Flight Finder and remove all data.\n"
+  read -rp "  Are you sure? [y/N] " confirm
+  if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    printf "  ${DIM}Cancelled${RESET}\n"
+    return
+  fi
+
+  printf "${CYAN}${BOLD}▸${RESET} Removing Flight Finder...\n"
+  dc down -v 2>/dev/null || true
+  rm -rf "$FLIGHT_FINDER_DIR"
+  rm -f "$HOME/.local/bin/flight-finder"
+  printf "${GREEN}${BOLD}✓${RESET} Uninstalled\n"
+}
+
+cmd_version() {
+  local version_json
+  version_json=$(ff_curl -sf "http://localhost:${PORT}/api/version" 2>/dev/null)
+  if [ -n "$version_json" ]; then
+    local ver commit
+    ver=$(echo "$version_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['current'])" 2>/dev/null)
+    commit=$(echo "$version_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['data'].get('commit','unknown'))" 2>/dev/null)
+    printf "flightfinder ${BOLD}%s${RESET} ${DIM}(%s)${RESET}\n" "$ver" "${commit:0:7}"
+  else
+    printf "flightfinder ${DIM}(not running — start with: flightfinder)${RESET}\n"
+  fi
+}
+
+cmd_help() {
+  echo ""
+  printf "${BOLD}  Flight Finder${RESET}\n"
+  echo ""
+  echo "  Usage: flight-finder [command]    (aliases: flightfinder, fairtrail)"
+  echo ""
+  echo "  Commands:"
+  echo "    (none)       Start Flight Finder (Ctrl+C to stop)"
+  echo "    search \"..\"  Search and track a flight from the terminal"
+  echo "    start        Start in background"
+  echo "    stop         Stop. Pauses all price tracking until you start again."
+  echo "    logs         View live logs"
+  echo "    status       Check if running"
+  echo "    update       Pull latest version and restart"
+  echo "    migrate      Migrate a pre-rename ~/.fairtrail install to ~/.flight-finder"
+  echo "    version      Show version and commit"
+  echo "    uninstall    Remove Flight Finder and all data"
+  echo "    help         Show this help"
+  echo ""
+  echo "  Shared access (self hosted):"
+  echo "    access setup                           Create first Admin and shared password"
+  echo "    access reset                           Replace the shared password locally"
+  echo "    access list                            List Sidedoor principals"
+  echo "    access origin <url>                    Configure the exact public login address"
+  echo "    access device <principal-id> [name]    Create an API device token"
+  echo ""
+  echo "  Terminal UI flags (forwarded to flight-finder-tui inside the container):"
+  echo "    hotels <command>        Search, track, and manage hotels (hotels --help)"
+  echo "    cars <command>          Search, track, and manage rental cars (cars --help)"
+  echo "    parse <query>           Parse locally or on a server (parse --help)"
+  echo "    --headless              Render the Ink terminal UI"
+  echo "    --list                  List tracked queries (with --headless)"
+  echo "    --view <id>             View a tracker (with --headless)"
+  echo "    --backend <provider>    AI backend override (claude-code, codex, anthropic, openai, google)"
+  echo "    --model <model>         Model override"
+  echo ""
+}
+
+# Dispatch terminal UI flags to flight-finder-tui inside the running container.
+cmd_access() {
+  # Local setup and reset must work even when the web server is not running.
+  dc run --rm --no-deps --entrypoint node web /app/packages/cli/dist/index.js "$@"
+}
+
+cmd_parse() {
+  local parse_env=()
+  [ -n "${FLIGHT_FINDER_SESSION:-}" ] && parse_env+=(-e FLIGHT_FINDER_SESSION)
+  [ -n "${FLIGHT_FINDER_TOKEN:-}" ] && parse_env+=(-e FLIGHT_FINDER_TOKEN)
+  dc run --rm --no-deps "${parse_env[@]}" --entrypoint node web /app/packages/cli/dist/index.js parse "$@"
+}
+
+cmd_tui() {
+  local health
+  health=$(fetch_health)
+  if [ -z "$health" ]; then
+    printf "${RED}${BOLD}✗${RESET} Flight Finder is not running. Start with: flightfinder\n"
+    exit 1
+  fi
+
+  # Compose flavors disagree on exec flags (issue #72). _compose_exec_flags
+  # picks -it/-i for docker-style, empty/-T for podman-compose standalone.
+  local stdin_tty stdout_tty exec_flags
+  [ -t 0 ] && stdin_tty=1 || stdin_tty=0
+  [ -t 1 ] && stdout_tty=1 || stdout_tty=0
+  exec_flags=$(_compose_exec_flags "$_DC" "$stdin_tty" "$stdout_tty")
+
+  # `exec` cannot run shell functions, so call $_DC directly instead of dc().
+  # $exec_flags is intentionally unquoted: empty string must word-split to
+  # nothing, otherwise podman-compose receives an empty arg and rejects it.
+  if [ "${1:-}" = "hotels" ] || [ "${1:-}" = "cars" ]; then
+    local travel_env=(-e FLIGHT_FINDER_URL=http://localhost:3003)
+    [ -n "${FLIGHT_FINDER_URL:-}" ] && travel_env=(-e FLIGHT_FINDER_URL)
+    [ -n "${FLIGHT_FINDER_SESSION:-}" ] && travel_env+=(-e FLIGHT_FINDER_SESSION)
+    [ -n "${FLIGHT_FINDER_TOKEN:-}" ] && travel_env+=(-e FLIGHT_FINDER_TOKEN)
+    if [ "${1:-}" = "cars" ]; then
+      travel_env+=(-e FLIGHT_FINDER_CAR_RECEIPTS=/app/data/car-receipts -e FLIGHT_FINDER_CAR_REQUIRE_MOUNT=1)
+    fi
+    exec $_DC $COMPOSE_FILES exec $exec_flags "${travel_env[@]}" web flight-finder-tui "$@"
+  fi
+  exec $_DC $COMPOSE_FILES exec $exec_flags web flight-finder-tui "$@"
+}
+
+cmd_travel() {
+  local travel_kind="$1" travel_args=("$1") travel_file=""
+  shift
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--file" ]; then
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then printf 'Error: --file requires a path\n' >&2; exit 1; fi
+      if [ -n "$travel_file" ]; then printf 'Error: supply --file only once\n' >&2; exit 1; fi
+      travel_file="$2"
+      travel_args+=(--file -)
+      shift 2
+    elif [[ "$1" == --file=* ]]; then
+      if [ -n "$travel_file" ]; then printf 'Error: supply --file only once\n' >&2; exit 1; fi
+      travel_file="${1#--file=}"
+      if [ -z "$travel_file" ]; then printf 'Error: --file requires a path\n' >&2; exit 1; fi
+      travel_args+=(--file -)
+      shift
+    else
+      travel_args+=("$1")
+      shift
+    fi
+  done
+  if [ -n "$travel_file" ] && [ "$travel_file" != "-" ]; then
+    if [ ! -f "$travel_file" ] || [ ! -r "$travel_file" ]; then printf 'Error: cannot read %s search file: %s\n' "$travel_kind" "$travel_file" >&2; exit 1; fi
+    cmd_tui "${travel_args[@]}" < "$travel_file"
+  else
+    cmd_tui "${travel_args[@]}"
+  fi
+}
+
+cmd_migrate() {
+  printf "${CYAN}${BOLD}▸${RESET} Running Flight Finder migration...\n"
+  if [ -d "$HOME/.fairtrail" ]; then
+    printf "  ${DIM}Re-running the installer which auto-detects ~/.fairtrail and migrates.${RESET}\n"
+    curl -fsSL "$BASE_URL/install.sh" | bash
+  else
+    ok "Nothing to migrate (no ~/.fairtrail directory found)"
+    printf "  ${DIM}If you are already on Flight Finder, run \`flight-finder update\` instead.${RESET}\n"
+  fi
+}
+
+case "${1:-}" in
+  access)    cmd_access "$@" ;;
+  hotels|cars) cmd_travel "$@" ;;
+  --headless|--list|--view|--backend|--model)
+    cmd_tui "$@" ;;
+  --tmux)
+    printf "${YELLOW}${BOLD}!${RESET} --tmux is not supported in the production install. Use the dev mode CLI: npm run cli -- --tmux ...\n"
+    exit 1 ;;
+  search)    shift; cmd_search "$@" ;;
+  parse)     shift; cmd_parse "$@" ;;
+  start)     cmd_start_background ;;
+  stop)      cmd_stop ;;
+  logs)      cmd_logs ;;
+  status)    cmd_status ;;
+  update)    cmd_update ;;
+  migrate)   cmd_migrate ;;
+  version|-v|--version) cmd_version ;;
+  uninstall) cmd_uninstall ;;
+  help|-h|--help) cmd_help ;;
+  "")        cmd_start_foreground ;;
+  *)         echo "Unknown command: $1"; cmd_help; exit 1 ;;
+esac

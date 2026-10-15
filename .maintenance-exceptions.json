@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "findings": [
+    {
+      "tool": "knip",
+      "mode": "all",
+      "file": "apps/desktop/package.json",
+      "kind": "binaries",
+      "name": "tauri",
+      "reason": "Provided by the standalone desktop package @tauri-apps/cli dev dependency."
+    },
+    {
+      "tool": "knip",
+      "mode": "all",
+      "file": "apps/desktop/package.json",
+      "kind": "devDependencies",
+      "name": "@tauri-apps/cli",
+      "reason": "The standalone desktop package uses this CLI to build and bundle the Tauri application."
+    },
+    {
+      "tool": "knip",
+      "mode": "all",
+      "file": "apps/web/package.json",
+      "kind": "dependencies",
+      "name": "@prisma/client",
+      "reason": "Generated Prisma clients import this runtime; generated files are excluded from the tracked source graph."
+    },
+    {
+      "tool": "knip",
+      "mode": "all",
+      "file": "apps/web/src/lib/scraper/cli-models.ts",
+      "kind": "binaries",
+      "name": "codex",
+      "reason": "External user-configured agent executable invoked by the CLI provider."
+    },
+    {
+      "tool": "knip",
+      "mode": "all",
+      "file": "apps/web/src/lib/scraper/flight-link.ts",
+      "kind": "types",
+      "name": "FlightLinkSegment",
+      "reason": "Consumed through import(./flight-link).FlightLinkSegment in extract-prices.ts; TypeScript verifies this reference."
+    },
+    {
+      "tool": "knip",
+      "mode": "all",
+      "file": "packages/cli/package.json",
+      "kind": "dependencies",
+      "name": "@prisma/client",
+      "reason": "Generated Prisma clients import this runtime; generated files are excluded from the tracked source graph."
+    },
+    {
+      "tool": "knip",
+      "mode": "all",
+      "file": "packages/cli/src/lib/tmux-view.ts",
+      "kind": "binaries",
+      "name": "ghostty",
+      "reason": "Optional installed terminal application used by tmux previews."
+    },
+    {
+      "tool": "knip",
+      "mode": "all",
+      "file": "scripts/capture-demo-light.ts",
+      "kind": "binaries",
+      "name": "ffmpeg",
+      "reason": "External media executable provided by the development and CI system environment."
+    },
+    {
+      "tool": "knip",
+      "mode": "all",
+      "file": "scripts/container-car-smoke.mjs",
+      "kind": "binaries",
+      "name": "flight-finder-tui",
+      "reason": "Installed terminal client exercised by the container smoke script."
+    }
+  ]
+}
